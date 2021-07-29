@@ -55,6 +55,7 @@ from pyspark.sql.types import (
     ArrayType,
     BooleanType,
     DataType,
+    DecimalType,
     DoubleType,
     FloatType,
     IntegerType,
@@ -1027,8 +1028,9 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
                     current = current.when(self.spark.column == SF.lit(to_replace), value)
 
             if hasattr(arg, "__missing__"):
-                tmp_val = arg[np._NoValue]
-                del arg[np._NoValue]  # Remove in case it's set in defaultdict.
+                tmp_val = arg[np._NoValue]  # type: ignore
+                # Remove in case it's set in defaultdict.
+                del arg[np._NoValue]  # type: ignore
                 current = current.otherwise(SF.lit(tmp_val))
             else:
                 current = current.otherwise(SF.lit(None).cast(self.spark.data_type))
@@ -1893,7 +1895,7 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
             self._psdf._update_internal_frame(psser._psdf._internal, requires_same_anchor=False)
             return None
         else:
-            return psser._with_new_scol(psser.spark.column)  # TODO: dtype?
+            return psser.copy()
 
     def _fillna(
         self,
@@ -1917,7 +1919,7 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
             cond = scol.isNull() | F.isnan(scol)
         else:
             if not self.spark.nullable:
-                return self.copy()
+                return self._psdf.copy()._psser_for(self._column_label)
             cond = scol.isNull()
 
         if value is not None:
@@ -3377,7 +3379,14 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
         if not isinstance(decimals, int):
             raise TypeError("decimals must be an integer")
         scol = F.round(self.spark.column, decimals)
-        return self._with_new_scol(scol)  # TODO: dtype?
+        return self._with_new_scol(
+            scol,
+            field=(
+                self._internal.data_fields[0].copy(nullable=True)
+                if not isinstance(self.spark.data_type, DecimalType)
+                else None
+            ),
+        )
 
     # TODO: add 'interpolation' parameter.
     def quantile(
@@ -3589,8 +3598,7 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
                 Window.unboundedPreceding, Window.unboundedFollowing
             )
             scol = stat_func(F.row_number().over(window1)).over(window2)
-        psser = self._with_new_scol(scol)
-        return psser.astype(np.float64)
+        return self._with_new_scol(scol.cast(DoubleType()))
 
     def filter(
         self,
@@ -4100,7 +4108,7 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
         b    2
         dtype: int64
         """
-        return self._psdf.copy(deep=deep)._psser_for(self._column_label)
+        return first_series(DataFrame(self._internal))
 
     def mode(self, dropna: bool = True) -> "Series":
         """
@@ -5241,18 +5249,28 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
 
         internal = self._internal.resolved_copy
 
-        index_map = list(zip(internal.index_spark_column_names, internal.index_names))
-        pivot_col, column_label_names = index_map.pop(level)
-        index_scol_names, index_names = zip(*index_map)
+        index_map = list(
+            zip(internal.index_spark_column_names, internal.index_names, internal.index_fields)
+        )
+        pivot_col, column_label_names, _ = index_map.pop(level)
+        index_scol_names, index_names, index_fields = zip(*index_map)
         col = internal.data_spark_column_names[0]
 
         sdf = internal.spark_frame
         sdf = sdf.groupby(list(index_scol_names)).pivot(pivot_col).agg(F.first(scol_for(sdf, col)))
-        internal = InternalFrame(  # TODO: dtypes?
+
+        internal = InternalFrame(
             spark_frame=sdf,
             index_spark_columns=[scol_for(sdf, col) for col in index_scol_names],
             index_names=list(index_names),
+            index_fields=list(index_fields),
             column_label_names=[column_label_names],
+        )
+        internal = internal.copy(
+            data_fields=[
+                field.copy(dtype=self._internal.data_fields[0].dtype)
+                for field in internal.data_fields
+            ]
         )
         return DataFrame(internal)
 
@@ -6166,7 +6184,7 @@ class Series(Frame, IndexOpsMixin, Generic[T]):
             internal = psser._internal.resolved_copy
             return first_series(DataFrame(internal))
         else:
-            return psser
+            return psser.copy()
 
     def _reduce_for_stat_function(
         self,
