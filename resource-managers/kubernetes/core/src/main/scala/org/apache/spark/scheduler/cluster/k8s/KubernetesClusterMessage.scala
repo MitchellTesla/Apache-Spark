@@ -14,18 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.scheduler
+package org.apache.spark.scheduler.cluster.k8s
 
-import org.apache.spark.annotation.{DeveloperApi, Since}
+import java.io.Serializable
 
-/**
- * :: DeveloperApi ::
- * Stores information about an Miscellaneous Process to pass from the scheduler to SparkListeners.
- */
-
-@DeveloperApi
-@Since("3.2.0")
-class MiscellaneousProcessDetails(
-    val hostPort: String,
-    val cores: Int,
-    val logUrlInfo: Map[String, String]) extends Serializable
+case class GenerateExecID(podName: String) extends Serializable
