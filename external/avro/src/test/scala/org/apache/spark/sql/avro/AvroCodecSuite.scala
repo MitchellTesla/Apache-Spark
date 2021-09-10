@@ -15,27 +15,15 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.connector.expressions.aggregate;
+package org.apache.spark.sql.avro
 
-import org.apache.spark.annotation.Evolving;
-import org.apache.spark.sql.connector.expressions.NamedReference;
+import org.apache.spark.sql.execution.datasources.FileSourceCodecSuite
+import org.apache.spark.sql.internal.SQLConf
 
-/**
- * An aggregate function that returns the minimum value in a group.
- *
- * @since 3.2.0
- */
-@Evolving
-public final class Min implements AggregateFunc {
-  private final NamedReference column;
+class AvroCodecSuite extends FileSourceCodecSuite {
 
-  public Min(NamedReference column) { this.column = column; }
-
-  public NamedReference column() { return column; }
-
-  @Override
-  public String toString() { return "MIN(" + column.describe() + ")"; }
-
-  @Override
-  public String describe() { return this.toString(); }
+  override def format: String = "avro"
+  override val codecConfigName: String = SQLConf.AVRO_COMPRESSION_CODEC.key
+  override protected def availableCodecs = Seq("uncompressed", "deflate", "snappy",
+    "bzip2", "xz", "zstandard")
 }

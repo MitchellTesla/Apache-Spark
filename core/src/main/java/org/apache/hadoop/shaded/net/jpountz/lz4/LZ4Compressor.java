@@ -15,27 +15,23 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.connector.expressions.aggregate;
-
-import org.apache.spark.annotation.Evolving;
-import org.apache.spark.sql.connector.expressions.NamedReference;
+package org.apache.hadoop.shaded.net.jpountz.lz4;
 
 /**
- * An aggregate function that returns the minimum value in a group.
- *
- * @since 3.2.0
+ * TODO(SPARK-36679): A temporary workaround for SPARK-36669. We should remove this after
+ * Hadoop 3.3.2 release which fixes the LZ4 relocation in shaded Hadoop client libraries.
+ * This does not need implement all net.jpountz.lz4.LZ4Compressor API, just the ones used
+ * by Hadoop Lz4Compressor.
  */
-@Evolving
-public final class Min implements AggregateFunc {
-  private final NamedReference column;
+public final class LZ4Compressor {
 
-  public Min(NamedReference column) { this.column = column; }
+  private net.jpountz.lz4.LZ4Compressor lz4Compressor;
 
-  public NamedReference column() { return column; }
+  public LZ4Compressor(net.jpountz.lz4.LZ4Compressor lz4Compressor) {
+    this.lz4Compressor = lz4Compressor;
+  }
 
-  @Override
-  public String toString() { return "MIN(" + column.describe() + ")"; }
-
-  @Override
-  public String describe() { return this.toString(); }
+  public void compress(java.nio.ByteBuffer src, java.nio.ByteBuffer dest) {
+    lz4Compressor.compress(src, dest);
+  }
 }
