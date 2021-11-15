@@ -15,24 +15,14 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.execution.python
+package org.apache.spark.sql.execution.command.v2
 
-import org.apache.spark.api.python.PythonEvalType
-import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.command
 
 /**
- * A relation produced by applying a function that takes an iterator of pandas DataFrames
- * and outputs an iterator of pandas DataFrames.
+ * The class contains tests for the `ALTER TABLE .. REPLACE COLUMNS` command
+ * to check V2 table catalogs.
  */
-case class MapInPandasExec(
-    func: Expression,
-    output: Seq[Attribute],
-    child: SparkPlan)
-  extends MapInBatchExec {
-
-  override protected val pythonEvalType: Int = PythonEvalType.SQL_MAP_PANDAS_ITER_UDF
-
-  override protected def withNewChildInternal(newChild: SparkPlan): MapInPandasExec =
-    copy(child = newChild)
-}
+class AlterTableReplaceColumnsSuite
+  extends command.AlterTableReplaceColumnsSuiteBase
+  with CommandSuiteBase
