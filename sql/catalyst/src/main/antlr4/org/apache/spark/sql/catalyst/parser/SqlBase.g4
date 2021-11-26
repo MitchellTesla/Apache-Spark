@@ -37,6 +37,11 @@ grammar SqlBase;
 
 @lexer::members {
   /**
+   * When true, parser should throw ParseExcetion for unclosed bracketed comment.
+   */
+  public boolean has_unclosed_bracketed_comment = false;
+
+  /**
    * Verify whether current token is a valid decimal token (which contains dot).
    * Returns true if the character that follows the token is not a digit or letter or underscore.
    *
@@ -72,6 +77,16 @@ grammar SqlBase;
     } else {
       return false;
     }
+  }
+
+  /**
+   * This method will be called when the character stream ends and try to find out the
+   * unclosed bracketed comment.
+   * If the method be called, it means the end of the entire character stream match,
+   * and we set the flag and fail later.
+   */
+  public void markUnclosedComment() {
+    has_unclosed_bracketed_comment = true;
   }
 }
 
@@ -600,8 +615,8 @@ fromClause
     ;
 
 temporalClause
-    : ((FOR SYSTEM_VERSION) | VERSION) AS OF version=(INTEGER_VALUE | STRING)
-    | ((FOR SYSTEM_TIME) | TIMESTAMP) AS OF timestamp=STRING
+    : FOR? (SYSTEM_VERSION | VERSION) AS OF version=(INTEGER_VALUE | STRING)
+    | FOR? (SYSTEM_TIME | TIMESTAMP) AS OF timestamp=valueExpression
     ;
 
 aggregationClause
@@ -716,7 +731,8 @@ identifierComment
     ;
 
 relationPrimary
-    : multipartIdentifier temporalClause? sample? tableAlias  #tableName
+    : multipartIdentifier temporalClause?
+      sample? tableAlias                      #tableName
     | '(' query ')' sample? tableAlias        #aliasedQuery
     | '(' relation ')' sample? tableAlias     #aliasedRelation
     | inlineTable                             #inlineTableDefault2
@@ -1926,7 +1942,7 @@ SIMPLE_COMMENT
     ;
 
 BRACKETED_COMMENT
-    : '/*' {!isHint()}? (BRACKETED_COMMENT|.)*? '*/' -> channel(HIDDEN)
+    : '/*' {!isHint()}? ( BRACKETED_COMMENT | . )*? ('*/' | {markUnclosedComment();} EOF) -> channel(HIDDEN)
     ;
 
 WS

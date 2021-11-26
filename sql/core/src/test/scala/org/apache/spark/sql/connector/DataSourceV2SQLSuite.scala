@@ -1093,6 +1093,24 @@ class DataSourceV2SQLSuite
     }
   }
 
+  test("SPARK-37456: Location in CreateNamespace should be qualified") {
+    withNamespace("testcat.ns1.ns2") {
+      val e = intercept[IllegalArgumentException] {
+        sql("CREATE NAMESPACE testcat.ns1.ns2 LOCATION ''")
+      }
+      assert(e.getMessage.contains("Can not create a Path from an empty string"))
+
+      sql("CREATE NAMESPACE testcat.ns1.ns2 LOCATION '/tmp/ns_test'")
+      val descriptionDf = sql("DESCRIBE NAMESPACE EXTENDED testcat.ns1.ns2")
+      assert(descriptionDf.collect() === Seq(
+        Row("Namespace Name", "ns2"),
+        Row(SupportsNamespaces.PROP_LOCATION.capitalize, "file:/tmp/ns_test"),
+        Row(SupportsNamespaces.PROP_OWNER.capitalize, defaultUser),
+        Row("Properties", ""))
+      )
+    }
+  }
+
   test("create/replace/alter table - reserved properties") {
     import TableCatalog._
     withSQLConf((SQLConf.LEGACY_PROPERTY_NON_RESERVED.key, "false")) {
@@ -1246,7 +1264,7 @@ class DataSourceV2SQLSuite
       assert(descriptionDf.collect() === Seq(
         Row("Namespace Name", "ns2"),
         Row(SupportsNamespaces.PROP_COMMENT.capitalize, "test namespace"),
-        Row(SupportsNamespaces.PROP_LOCATION.capitalize, "/tmp/ns_test"),
+        Row(SupportsNamespaces.PROP_LOCATION.capitalize, "file:/tmp/ns_test"),
         Row(SupportsNamespaces.PROP_OWNER.capitalize, defaultUser),
         Row("Properties", "((a,b), (b,a), (c,c))"))
       )
@@ -1294,7 +1312,7 @@ class DataSourceV2SQLSuite
       assert(descriptionDf.collect() === Seq(
         Row("Namespace Name", "ns2"),
         Row(SupportsNamespaces.PROP_COMMENT.capitalize, "test namespace"),
-        Row(SupportsNamespaces.PROP_LOCATION.capitalize, "/tmp/ns_test_2"),
+        Row(SupportsNamespaces.PROP_LOCATION.capitalize, "file:/tmp/ns_test_2"),
         Row(SupportsNamespaces.PROP_OWNER.capitalize, defaultUser),
         Row("Properties", ""))
       )
@@ -2122,62 +2140,6 @@ class DataSourceV2SQLSuite
     assert(e.message.contains("CREATE VIEW is only supported with v1 tables"))
   }
 
-  test("SHOW TBLPROPERTIES: v2 table") {
-    val t = "testcat.ns1.ns2.tbl"
-    withTable(t) {
-      val user = "andrew"
-      val status = "new"
-      val provider = "foo"
-      spark.sql(s"CREATE TABLE $t (id bigint, data string) USING $provider " +
-        s"TBLPROPERTIES ('user'='$user', 'status'='$status')")
-
-      val properties = sql(s"SHOW TBLPROPERTIES $t")
-
-      val schema = new StructType()
-        .add("key", StringType, nullable = false)
-        .add("value", StringType, nullable = false)
-
-      val expected = Seq(
-        Row("status", status),
-        Row("user", user))
-
-      assert(properties.schema === schema)
-      assert(expected === properties.collect())
-    }
-  }
-
-  test("SHOW TBLPROPERTIES(key): v2 table") {
-    val t = "testcat.ns1.ns2.tbl"
-    withTable(t) {
-      val user = "andrew"
-      val status = "new"
-      val provider = "foo"
-      spark.sql(s"CREATE TABLE $t (id bigint, data string) USING $provider " +
-        s"TBLPROPERTIES ('user'='$user', 'status'='$status')")
-
-      val properties = sql(s"SHOW TBLPROPERTIES $t ('status')")
-
-      val expected = Seq(Row("status", status))
-
-      assert(expected === properties.collect())
-    }
-  }
-
-  test("SHOW TBLPROPERTIES(key): v2 table, key not found") {
-    val t = "testcat.ns1.ns2.tbl"
-    withTable(t) {
-      val nonExistingKey = "nonExistingKey"
-      spark.sql(s"CREATE TABLE $t (id bigint, data string) USING foo " +
-        s"TBLPROPERTIES ('user'='andrew', 'status'='new')")
-
-      val properties = sql(s"SHOW TBLPROPERTIES $t ('$nonExistingKey')")
-
-      val expected = Seq(Row(nonExistingKey, s"Table $t does not have property: $nonExistingKey"))
-
-      assert(expected === properties.collect())
-    }
-  }
-
   test("DESCRIBE FUNCTION: only support session catalog") {
     val e = intercept[AnalysisException] {
       sql("DESCRIBE FUNCTION testcat.ns1.ns2.fun")
@@ -2949,8 +2911,10 @@ class DataSourceV2SQLSuite
     }
   }
 
-  test("Mock time travel test") {
+  test("time travel") {
     sql("use testcat")
+    // The testing in-memory table simply append the version/timestamp to the table name when
+    // looking up tables.
     val t1 = "testcat.tSnapshot123456789"
     val t2 = "testcat.t2345678910"
     withTable(t1, t2) {
@@ -2966,17 +2930,13 @@ class DataSourceV2SQLSuite
         === Array(Row(1), Row(2)))
       assert(sql("SELECT * FROM t VERSION AS OF 2345678910").collect
         === Array(Row(3), Row(4)))
-      assert(sql("SELECT * FROM t FOR SYSTEM_VERSION AS OF 'Snapshot123456789'").collect
-        === Array(Row(1), Row(2)))
-      assert(sql("SELECT * FROM t FOR SYSTEM_VERSION AS OF 2345678910").collect
-        === Array(Row(3), Row(4)))
     }
 
     val ts1 = DateTimeUtils.stringToTimestampAnsi(
       UTF8String.fromString("2019-01-29 00:37:58"),
       DateTimeUtils.getZoneId(SQLConf.get.sessionLocalTimeZone))
     val ts2 = DateTimeUtils.stringToTimestampAnsi(
-      UTF8String.fromString("2021-01-29 00:37:58"),
+      UTF8String.fromString("2021-01-29 00:00:00"),
       DateTimeUtils.getZoneId(SQLConf.get.sessionLocalTimeZone))
     val t3 = s"testcat.t$ts1"
     val t4 = s"testcat.t$ts2"
@@ -2992,12 +2952,25 @@ class DataSourceV2SQLSuite
 
       assert(sql("SELECT * FROM t TIMESTAMP AS OF '2019-01-29 00:37:58'").collect
         === Array(Row(5), Row(6)))
-      assert(sql("SELECT * FROM t TIMESTAMP AS OF '2021-01-29 00:37:58'").collect
+      assert(sql("SELECT * FROM t TIMESTAMP AS OF '2021-01-29 00:00:00'").collect
         === Array(Row(7), Row(8)))
-      assert(sql("SELECT * FROM t FOR SYSTEM_TIME AS OF '2019-01-29 00:37:58'").collect
-        === Array(Row(5), Row(6)))
-      assert(sql("SELECT * FROM t FOR SYSTEM_TIME AS OF '2021-01-29 00:37:58'").collect
+      assert(sql("SELECT * FROM t TIMESTAMP AS OF make_date(2021, 1, 29)").collect
         === Array(Row(7), Row(8)))
+
+      val e1 = intercept[AnalysisException](
+        sql("SELECT * FROM t TIMESTAMP AS OF INTERVAL 1 DAY").collect()
+      )
+      assert(e1.message.contains("is not a valid timestamp expression for time travel"))
+
+      val e2 = intercept[AnalysisException](
+        sql("SELECT * FROM t TIMESTAMP AS OF 'abc'").collect()
+      )
+      assert(e2.message.contains("is not a valid timestamp expression for time travel"))
+
+      val e3 = intercept[AnalysisException](
+        sql("SELECT * FROM t TIMESTAMP AS OF abs(true)").collect()
+      )
+      assert(e3.message.contains("cannot resolve 'abs(true)' due to data type mismatch"))
     }
   }
 
