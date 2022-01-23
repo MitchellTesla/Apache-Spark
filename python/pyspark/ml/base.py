@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from abc import ABCMeta, abstractmethod, abstractproperty
+from abc import ABCMeta, abstractmethod
 
 import copy
 import threading
@@ -34,7 +34,7 @@ from pyspark.sql.functions import udf
 from pyspark.sql.types import StructField, StructType
 
 
-class _FitMultipleIterator(object):
+class _FitMultipleIterator:
     """
     Used by default implementation of Estimator.fitMultiple to produce models in a thread safe
     iterator. This class handles the simple case of fitMultiple where each param map should be
@@ -360,7 +360,8 @@ class PredictionModel(Model, _PredictorParams, metaclass=ABCMeta):
         """
         return self._set(predictionCol=value)
 
-    @abstractproperty
+    @property
+    @abstractmethod
     @since("2.1.0")
     def numFeatures(self):
         """
