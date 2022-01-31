@@ -623,8 +623,8 @@ object KubernetesIntegrationTests {
 
   val dockerBuild = TaskKey[Unit]("docker-imgs", "Build the docker images for ITs.")
   val runITs = TaskKey[Unit]("run-its", "Only run ITs, skip image build.")
-  val imageTag = settingKey[String]("Tag to use for images built during the test.")
-  val namespace = settingKey[String]("Namespace where to run pods.")
+  val imageTag = sys.props.get("spark.kubernetes.test.imageTag")
+  val namespace = sys.props.get("spark.kubernetes.test.namespace")
   val deployMode = sys.props.get("spark.kubernetes.test.deployMode")
 
   // Hack: this variable is used to control whether to build docker images. It's updated by
@@ -633,8 +633,6 @@ object KubernetesIntegrationTests {
   private var shouldBuildImage = true
 
   lazy val settings = Seq(
-    imageTag := "dev",
-    namespace := "default",
     dockerBuild := {
       if (shouldBuildImage) {
         val dockerTool = s"$sparkHome/bin/docker-image-tool.sh"
@@ -648,7 +646,7 @@ object KubernetesIntegrationTests {
           Seq("-f", s"$dockerFile")
         }
         val cmd = Seq(dockerTool,
-          "-t", imageTag.value,
+          "-t", imageTag.getOrElse("dev"),
           "-p", s"$bindingsDir/python/Dockerfile",
           "-R", s"$bindingsDir/R/Dockerfile") ++
           (if (deployMode == Some("docker-for-desktop")) Seq.empty else Seq("-m")) ++
@@ -670,10 +668,10 @@ object KubernetesIntegrationTests {
     (Test / test) := (Test / test).dependsOn(dockerBuild).value,
     (Test / javaOptions) ++= Seq(
       s"-Dspark.kubernetes.test.deployMode=${deployMode.getOrElse("minikube")}",
-      s"-Dspark.kubernetes.test.imageTag=${imageTag.value}",
-      s"-Dspark.kubernetes.test.namespace=${namespace.value}",
+      s"-Dspark.kubernetes.test.imageTag=${imageTag.getOrElse("dev")}",
       s"-Dspark.kubernetes.test.unpackSparkDir=$sparkHome"
     ),
+    (Test / javaOptions) ++= namespace.map("-Dspark.kubernetes.test.namespace=" + _),
     // Force packaging before building images, so that the latest code is tested.
     dockerBuild := dockerBuild
       .dependsOn(assembly / Compile / packageBin)
