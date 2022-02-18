@@ -28,6 +28,7 @@ import scala.util.{Failure, Random, Success, Try}
 
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst._
+import org.apache.spark.sql.catalyst.analysis.SimpleAnalyzer.{extraHintForAnsiTypeCoercionExpression, DATA_TYPE_MISMATCH_ERROR}
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.encoders.OuterScopes
 import org.apache.spark.sql.catalyst.expressions.{Expression, FrameLessOffsetWindowFunction, _}
@@ -3926,9 +3927,16 @@ object TimeWindowing extends Rule[LogicalPlan] {
 
           val projections = windows.map(_ +: child.output)
 
+          // When the condition windowDuration % slideDuration = 0 is fulfilled,
+          // the estimation of the number of windows becomes exact one,
+          // which means all produced windows are valid.
           val filterExpr =
-            window.timeColumn >= windowAttr.getField(WINDOW_START) &&
-              window.timeColumn < windowAttr.getField(WINDOW_END)
+            if (window.windowDuration % window.slideDuration == 0) {
+              IsNotNull(window.timeColumn)
+            } else {
+              window.timeColumn >= windowAttr.getField(WINDOW_START) &&
+                window.timeColumn < windowAttr.getField(WINDOW_END)
+            }
 
           val substitutedPlan = Filter(filterExpr,
             Expand(projections, windowAttr +: child.output, child))
@@ -4247,7 +4255,30 @@ object ApplyCharTypePadding extends Rule[LogicalPlan] {
  * rule right after the main resolution batch.
  */
 object RemoveTempResolvedColumn extends Rule[LogicalPlan] {
-  override def apply(plan: LogicalPlan): LogicalPlan = plan.resolveExpressions {
-    case t: TempResolvedColumn => UnresolvedAttribute(t.nameParts)
+  override def apply(plan: LogicalPlan): LogicalPlan = {
+    plan.foreachUp {
+      // HAVING clause will be resolved as a Filter. When having func(column with wrong data type),
+      // the column could be wrapped by a TempResolvedColumn, e.g. mean(tempresolvedcolumn(t.c)).
+      // Because TempResolvedColumn can still preserve column data type, here is a chance to check
+      // if the data type matches with the required data type of the function. We can throw an error
+      // when data types mismatches.
+      case operator: Filter =>
+        operator.expressions.foreach(_.foreachUp {
+          case e: Expression if e.childrenResolved && e.checkInputDataTypes().isFailure =>
+            e.checkInputDataTypes() match {
+              case TypeCheckResult.TypeCheckFailure(message) =>
+                e.setTagValue(DATA_TYPE_MISMATCH_ERROR, true)
+                e.failAnalysis(
+                  s"cannot resolve '${e.sql}' due to data type mismatch: $message" +
+                    extraHintForAnsiTypeCoercionExpression(plan))
+            }
+          case _ =>
+        })
+      case _ =>
+    }
+
+    plan.resolveExpressions {
+      case t: TempResolvedColumn => UnresolvedAttribute(t.nameParts)
+    }
   }
 }
