@@ -734,10 +734,10 @@ abstract class OrcQuerySuite extends OrcQueryTest with SharedSparkSession {
 
       withSQLConf(SQLConf.ORC_VECTORIZED_READER_NESTED_COLUMN_ENABLED.key -> "true") {
         val readDf = spark.read.orc(path)
-        val vectorizationEnabled = readDf.queryExecution.executedPlan.find {
+        val vectorizationEnabled = readDf.queryExecution.executedPlan.exists {
           case scan @ (_: FileSourceScanExec | _: BatchScanExec) => scan.supportsColumnar
           case _ => false
-        }.isDefined
+        }
         assert(vectorizationEnabled)
         checkAnswer(readDf, df)
       }
@@ -756,10 +756,10 @@ abstract class OrcQuerySuite extends OrcQueryTest with SharedSparkSession {
 
       withSQLConf(SQLConf.ORC_VECTORIZED_READER_NESTED_COLUMN_ENABLED.key -> "true") {
         val readDf = spark.read.orc(path)
-        val vectorizationEnabled = readDf.queryExecution.executedPlan.find {
+        val vectorizationEnabled = readDf.queryExecution.executedPlan.exists {
           case scan @ (_: FileSourceScanExec | _: BatchScanExec) => scan.supportsColumnar
           case _ => false
-        }.isDefined
+        }
         assert(vectorizationEnabled)
         checkAnswer(readDf, df)
       }
@@ -783,10 +783,10 @@ abstract class OrcQuerySuite extends OrcQueryTest with SharedSparkSession {
           withSQLConf(SQLConf.ORC_VECTORIZED_READER_NESTED_COLUMN_ENABLED.key -> "true",
             SQLConf.WHOLESTAGE_MAX_NUM_FIELDS.key -> maxNumFields) {
             val scanPlan = spark.read.orc(path).queryExecution.executedPlan
-            assert(scanPlan.find {
+            assert(scanPlan.exists {
               case scan @ (_: FileSourceScanExec | _: BatchScanExec) => scan.supportsColumnar
               case _ => false
-            }.isDefined == vectorizedEnabled)
+            } == vectorizedEnabled)
           }
       }
     }
@@ -800,32 +800,6 @@ abstract class OrcQuerySuite extends OrcQueryTest with SharedSparkSession {
     withOrcFile(data) { file =>
       withAllNativeOrcReaders {
         checkAnswer(spark.read.orc(file), data.toDF().collect())
-      }
-    }
-  }
-
-  test("SPARK-36346: can't read TimestampLTZ as TimestampNTZ") {
-    val data = (1 to 10).map { i =>
-      val ts = new Timestamp(i)
-      Row(ts)
-    }
-    val answer = (1 to 10).map { i =>
-      // The second parameter is `nanoOfSecond`, while java.sql.Timestamp accepts milliseconds
-      // as input. So here we multiple the `nanoOfSecond` by NANOS_PER_MILLIS
-      val ts = LocalDateTime.ofEpochSecond(0, i * 1000000, ZoneOffset.UTC)
-      Row(ts)
-    }
-    val actualSchema = StructType(Seq(StructField("time", TimestampType, false)))
-    val providedSchema = StructType(Seq(StructField("time", TimestampNTZType, false)))
-
-    withTempPath { file =>
-      val df = spark.createDataFrame(sparkContext.parallelize(data), actualSchema)
-      df.write.orc(file.getCanonicalPath)
-      withAllNativeOrcReaders {
-        val msg = intercept[SparkException] {
-          spark.read.schema(providedSchema).orc(file.getCanonicalPath).collect()
-        }.getMessage
-        assert(msg.contains("Unable to convert timestamp of Orc to data type 'timestamp_ntz'"))
       }
     }
   }
