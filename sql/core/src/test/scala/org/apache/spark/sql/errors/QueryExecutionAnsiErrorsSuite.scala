@@ -16,7 +16,7 @@
  */
 package org.apache.spark.sql.errors
 
-import org.apache.spark.{SparkArithmeticException, SparkArrayIndexOutOfBoundsException, SparkConf, SparkDateTimeException}
+import org.apache.spark.{SparkArithmeticException, SparkArrayIndexOutOfBoundsException, SparkConf, SparkDateTimeException, SparkNoSuchElementException}
 import org.apache.spark.sql.QueryTest
 import org.apache.spark.sql.internal.SQLConf
 
@@ -33,10 +33,11 @@ class QueryExecutionAnsiErrorsSuite extends QueryTest with QueryErrorsSuiteBase 
       },
       errorClass = "CAST_CAUSES_OVERFLOW",
       msg =
-        "Casting 253402258394567890L to \"INT\" causes overflow. " +
+        "Casting TIMESTAMP '9999-12-.*.56789' to \"INT\" causes overflow. " +
         "To return NULL instead, use 'try_cast'. " +
         s"If necessary set $ansiConf to false to bypass this error.",
-      sqlState = Some("22005"))
+      sqlState = Some("22005"),
+      matchMsg = true)
   }
 
   test("DIVIDE_BY_ZERO: can't divide an integer by zero") {
@@ -104,6 +105,23 @@ class QueryExecutionAnsiErrorsSuite extends QueryTest with QueryErrorsSuiteBase 
       msg = "Invalid index: 8, numElements: 5. " +
         "To return NULL instead, use 'try_element_at'. " +
         s"If necessary set $ansiConf to false to bypass this error."
+    )
+  }
+
+  test("MAP_KEY_DOES_NOT_EXIST: key does not exist in element_at") {
+    val e = intercept[SparkNoSuchElementException] {
+      sql("select element_at(map(1, 'a', 2, 'b'), 3)").collect()
+    }
+    checkErrorClass(
+      exception = e,
+      errorClass = "MAP_KEY_DOES_NOT_EXIST",
+      msg = "Key 3 does not exist. To return NULL instead, use 'try_element_at'. " +
+        "If necessary set spark.sql.ansi.enabled to false to bypass this error." +
+        """
+          |== SQL(line 1, position 7) ==
+          |select element_at(map(1, 'a', 2, 'b'), 3)
+          |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          |""".stripMargin
     )
   }
 }
