@@ -1659,7 +1659,7 @@ object QueryExecutionErrors extends QueryErrorsBase {
       permission: FsPermission,
       path: Path,
       e: Throwable): Throwable = {
-    new SparkSecurityException(errorClass = "FAILED_SET_ORIGINAL_PERMISSION_BACK",
+    new SparkSecurityException(errorClass = "RESET_PERMISSION_TO_ORIGINAL",
       Array(permission.toString, path.toString, e.getMessage))
   }
 
@@ -2004,5 +2004,10 @@ object QueryExecutionErrors extends QueryErrorsBase {
   def invalidBucketFile(path: String): Throwable = {
     new SparkException(errorClass = "INVALID_BUCKET_FILE", messageParameters = Array(path),
       cause = null)
+  }
+
+  def multipleRowSubqueryError(plan: String): Throwable = {
+    new SparkException(
+      errorClass = "MULTI_VALUE_SUBQUERY_ERROR", messageParameters = Array(plan), cause = null)
   }
 }
