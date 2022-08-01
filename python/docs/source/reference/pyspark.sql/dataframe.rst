@@ -102,6 +102,7 @@ DataFrame
     DataFrame.summary
     DataFrame.tail
     DataFrame.take
+    DataFrame.to
     DataFrame.toDF
     DataFrame.toJSON
     DataFrame.toLocalIterator
@@ -112,6 +113,7 @@ DataFrame
     DataFrame.unionAll
     DataFrame.unionByName
     DataFrame.unpersist
+    DataFrame.unpivot
     DataFrame.where
     DataFrame.withColumn
     DataFrame.withColumns
