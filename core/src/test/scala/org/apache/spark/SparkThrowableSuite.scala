@@ -45,7 +45,6 @@ class SparkThrowableSuite extends SparkFunSuite {
         "core/testOnly *SparkThrowableSuite -- -t \"Error classes are correctly formatted\""
    }}}
    */
-  private val regenerateGoldenFiles: Boolean = System.getenv("SPARK_GENERATE_GOLDEN_FILES") == "1"
   private val errorClassDir = getWorkspaceFilePath(
     "core", "src", "main", "resources", "error").toFile
 
@@ -127,7 +126,7 @@ class SparkThrowableSuite extends SparkFunSuite {
 
   test("Message format invariants") {
     val messageFormats = errorClassToInfoMap.values.toSeq.flatMap { i =>
-      Seq(i.messageFormat) ++ i.subClass.getOrElse(Map.empty).values.toSeq.map(_.messageFormat)
+      Seq(i.messageFormat)
     }
     checkCondition(messageFormats, s => s != null)
     checkIfUnique(messageFormats)
@@ -160,7 +159,7 @@ class SparkThrowableSuite extends SparkFunSuite {
   test("Check if message parameters match message format") {
     // Requires 2 args
     intercept[IllegalFormatException] {
-      getMessage("UNRESOLVED_COLUMN", null, Array.empty)
+      getMessage("UNRESOLVED_COLUMN", "WITHOUT_SUGGESTION", Array.empty)
     }
 
     // Does not fail with too many args (expects 0 args)
@@ -172,9 +171,15 @@ class SparkThrowableSuite extends SparkFunSuite {
   }
 
   test("Error message is formatted") {
-    assert(getMessage("UNRESOLVED_COLUMN", null, Array("`foo`", "`bar`, `baz`")) ==
-      "[UNRESOLVED_COLUMN] A column or function parameter with name `foo` cannot be resolved. " +
-        "Did you mean one of the following? [`bar`, `baz`]")
+    assert(
+      getMessage(
+        "UNRESOLVED_COLUMN",
+        "WITH_SUGGESTION",
+        Array("`foo`", "`bar`, `baz`")
+      ) ==
+      "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column or function parameter with " +
+        "name `foo` cannot be resolved. Did you mean one of the following? [`bar`, `baz`]"
+    )
   }
 
   test("Try catching legacy SparkError") {
@@ -221,5 +226,85 @@ class SparkThrowableSuite extends SparkFunSuite {
         // Should not end up here
         assert(false)
     }
+  }
+
+  test("Get message in the specified format") {
+    import ErrorMessageFormat._
+    class TestQueryContext extends QueryContext {
+      override val objectName = "v1"
+      override val objectType = "VIEW"
+      override val startIndex = 2
+      override val stopIndex = -1
+      override val fragment = "1 / 0"
+    }
+    val e = new SparkArithmeticException(
+      errorClass = "DIVIDE_BY_ZERO",
+      errorSubClass = None,
+      messageParameters = Array("CONFIG"),
+      context = Array(new TestQueryContext),
+      summary = "Query summary")
+
+    assert(SparkThrowableHelper.getMessage(e, PRETTY) ===
+      "[DIVIDE_BY_ZERO] Division by zero. Use `try_divide` to tolerate divisor being 0 " +
+      "and return NULL instead. If necessary set CONFIG to \"false\" to bypass this error." +
+      "\nQuery summary")
+    // scalastyle:off line.size.limit
+    assert(SparkThrowableHelper.getMessage(e, MINIMAL) ===
+      """{
+        |  "errorClass" : "DIVIDE_BY_ZERO",
+        |  "sqlState" : "22012",
+        |  "messageParameters" : {
+        |    "config" : "CONFIG"
+        |  },
+        |  "queryContext" : [ {
+        |    "objectType" : "VIEW",
+        |    "objectName" : "v1",
+        |    "startIndex" : 3,
+        |    "fragment" : "1 / 0"
+        |  } ]
+        |}""".stripMargin)
+    assert(SparkThrowableHelper.getMessage(e, STANDARD) ===
+      """{
+        |  "errorClass" : "DIVIDE_BY_ZERO",
+        |  "message" : "Division by zero. Use `try_divide` to tolerate divisor being 0 and return NULL instead. If necessary set <config> to \"false\" to bypass this error.",
+        |  "sqlState" : "22012",
+        |  "messageParameters" : {
+        |    "config" : "CONFIG"
+        |  },
+        |  "queryContext" : [ {
+        |    "objectType" : "VIEW",
+        |    "objectName" : "v1",
+        |    "startIndex" : 3,
+        |    "fragment" : "1 / 0"
+        |  } ]
+        |}""".stripMargin)
+      // scalastyle:on line.size.limit
+    // STANDARD w/ errorSubClass but w/o queryContext
+    val e2 = new SparkIllegalArgumentException(
+      errorClass = "UNSUPPORTED_SAVE_MODE",
+      errorSubClass = Some("EXISTENT_PATH"),
+      messageParameters = Array("UNSUPPORTED_MODE"))
+    assert(SparkThrowableHelper.getMessage(e2, STANDARD) ===
+      """{
+        |  "errorClass" : "UNSUPPORTED_SAVE_MODE",
+        |  "errorSubClass" : "EXISTENT_PATH",
+        |  "message" : "The save mode <saveMode> is not supported for:",
+        |  "messageParameters" : {
+        |    "saveMode" : "UNSUPPORTED_MODE"
+        |  }
+        |}""".stripMargin)
+    // Legacy mode when an exception does not have any error class
+    class LegacyException extends Throwable with SparkThrowable {
+      override def getErrorClass: String = null
+      override def getMessage: String = "Test message"
+    }
+    val e3 = new LegacyException
+    assert(SparkThrowableHelper.getMessage(e3, MINIMAL) ===
+      """{
+        |  "errorClass" : "LEGACY",
+        |  "messageParameters" : {
+        |    "message" : "Test message"
+        |  }
+        |}""".stripMargin)
   }
 }

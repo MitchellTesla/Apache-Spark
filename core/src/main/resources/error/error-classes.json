@@ -17,11 +17,11 @@
     ],
     "sqlState" : "22005"
   },
-  "CANNOT_CHANGE_DECIMAL_PRECISION" : {
+  "CANNOT_DECODE_URL" : {
     "message" : [
-      "<value> cannot be represented as Decimal(<precision>, <scale>). If necessary set <config> to \"false\" to bypass this error."
+      "Cannot decode url : <url>."
     ],
-    "sqlState" : "22005"
+    "sqlState" : "42000"
   },
   "CANNOT_INFER_DATE" : {
     "message" : [
@@ -65,10 +65,38 @@
     ],
     "sqlState" : "22005"
   },
+  "COLUMN_NOT_IN_GROUP_BY_CLAUSE" : {
+    "message" : [
+      "The expression <expression> is neither present in the group by, nor is it an aggregate function. Add to group by or wrap in `first()` (or `first_value()`) if you don't care which value you get."
+    ],
+    "sqlState" : "42000"
+  },
   "CONCURRENT_QUERY" : {
     "message" : [
       "Another instance of this query was just started by a concurrent session."
     ]
+  },
+  "CONVERSION_INVALID_INPUT" : {
+    "message" : [
+      "The value <str> (<fmt>) cannot be converted to <targetType> because it is malformed. Correct the value as per the syntax, or change its format. Use <suggestion> to tolerate malformed input and return NULL instead."
+    ]
+  },
+  "DATATYPE_MISMATCH" : {
+    "message" : [
+      "Cannot resolve <sqlExpr> due to data type mismatch:"
+    ],
+    "subClass" : {
+      "BINARY_OP_DIFF_TYPES" : {
+        "message" : [
+          "the left and right operands of the binary operator have incompatible types (<left> and <right>)."
+        ]
+      },
+      "BINARY_OP_WRONG_TYPE" : {
+        "message" : [
+          "the binary operator requires the input type <inputType>, not <actualDataType>."
+        ]
+      }
+    }
   },
   "DATETIME_OVERFLOW" : {
     "message" : [
@@ -135,6 +163,18 @@
     "message" : [
       "Grouping sets size cannot be greater than <maxSize>"
     ]
+  },
+  "GROUP_BY_POS_OUT_OF_RANGE" : {
+    "message" : [
+      "GROUP BY position <index> is not in select list (valid range is [1, <size>])."
+    ],
+    "sqlState" : "42000"
+  },
+  "GROUP_BY_POS_REFERS_AGG_EXPR" : {
+    "message" : [
+      "GROUP BY <index> refers to an expression <aggExpr> that contains an aggregate function. Aggregate functions are not allowed in GROUP BY."
+    ],
+    "sqlState" : "42000"
   },
   "INCOMPARABLE_PIVOT_COLUMN" : {
     "message" : [
@@ -224,7 +264,7 @@
   },
   "INVALID_ARRAY_INDEX" : {
     "message" : [
-      "The index <indexValue> is out of bounds. The array has <arraySize> elements. Use `try_element_at` and increase the array index by 1(the starting array index is 1 for `try_element_at`) to tolerate accessing element at invalid index and return NULL instead. If necessary set <ansiConfig> to \"false\" to bypass this error."
+      "The index <indexValue> is out of bounds. The array has <arraySize> elements. Use the SQL function `get()` to tolerate accessing element at invalid index and return NULL instead. If necessary set <ansiConfig> to \"false\" to bypass this error."
     ]
   },
   "INVALID_ARRAY_INDEX_IN_ELEMENT_AT" : {
@@ -287,11 +327,6 @@
     ],
     "sqlState" : "42000"
   },
-  "MAP_KEY_DOES_NOT_EXIST" : {
-    "message" : [
-      "Key <keyValue> does not exist. Use `try_element_at` to tolerate non-existent key and return NULL instead. If necessary set <config> to \"false\" to bypass this error."
-    ]
-  },
   "MISSING_STATIC_PARTITION_COLUMN" : {
     "message" : [
       "Unknown static partition column: <columnName>"
@@ -305,7 +340,7 @@
   },
   "MULTI_VALUE_SUBQUERY_ERROR" : {
     "message" : [
-      "more than one row returned by a subquery used as an expression: <plan>"
+      "More than one row returned by a subquery used as an expression."
     ]
   },
   "NON_LITERAL_PIVOT_VALUES" : {
@@ -346,6 +381,12 @@
     "message" : [
       "The comparison result is null. If you want to handle null as 0 (equal), you can set \"spark.sql.legacy.allowNullComparisonResultInArraySort\" to \"true\"."
     ]
+  },
+  "NUMERIC_VALUE_OUT_OF_RANGE" : {
+    "message" : [
+      "<value> cannot be represented as Decimal(<precision>, <scale>). If necessary set <config> to \"false\" to bypass this error."
+    ],
+    "sqlState" : "22005"
   },
   "PARSE_CHAR_MISSING_LENGTH" : {
     "message" : [
@@ -413,20 +454,56 @@
   },
   "UNRESOLVED_COLUMN" : {
     "message" : [
-      "A column or function parameter with name <objectName> cannot be resolved. Did you mean one of the following? [<objectList>]"
+      "A column or function parameter with name <objectName> cannot be resolved."
     ],
+    "subClass" : {
+      "WITHOUT_SUGGESTION" : {
+        "message" : [
+          ""
+        ]
+      },
+      "WITH_SUGGESTION" : {
+        "message" : [
+          "Did you mean one of the following? [<proposal>]"
+        ]
+      }
+    },
     "sqlState" : "42000"
   },
   "UNRESOLVED_FIELD" : {
     "message" : [
-      "A field with name <fieldName> cannot be resolved with the struct-type column <columnPath>. Did you mean one of the following? [<proposal>]"
+      "A field with name <fieldName> cannot be resolved with the struct-type column <columnPath>."
     ],
+    "subClass" : {
+      "WITHOUT_SUGGESTION" : {
+        "message" : [
+          ""
+        ]
+      },
+      "WITH_SUGGESTION" : {
+        "message" : [
+          "Did you mean one of the following? [<proposal>]"
+        ]
+      }
+    },
     "sqlState" : "42000"
   },
   "UNRESOLVED_MAP_KEY" : {
     "message" : [
-      "Cannot resolve column <columnName> as a map key. If the key is a string literal, please add single quotes around it. Otherwise, did you mean one of the following column(s)? [<proposal>]"
+      "Cannot resolve column <columnName> as a map key. If the key is a string literal, please add single quotes around it."
     ],
+    "subClass" : {
+      "WITHOUT_SUGGESTION" : {
+        "message" : [
+          ""
+        ]
+      },
+      "WITH_SUGGESTION" : {
+        "message" : [
+          "Otherwise did you mean one of the following column(s)? [<proposal>]"
+        ]
+      }
+    },
     "sqlState" : "42000"
   },
   "UNSUPPORTED_DATATYPE" : {
@@ -550,6 +627,11 @@
       "SET_TABLE_PROPERTY" : {
         "message" : [
           "<property> is a reserved table property, <msg>."
+        ]
+      },
+      "TABLE_OPERATION" : {
+        "message" : [
+          "Table <tableName> does not support <operation>. Please check the current catalog and namespace to make sure the qualified table name is expected, and also check the catalog implementation which is configured by \"spark.sql.catalog\"."
         ]
       },
       "TOO_MANY_TYPE_ARGUMENTS_FOR_UDF_CLASS" : {

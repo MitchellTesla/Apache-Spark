@@ -310,9 +310,9 @@ class DatasetUnpivotSuite extends QueryTest
       errorClass = "UNPIVOT_VALUE_DATA_TYPE_MISMATCH",
       parameters = Map(
         "types" ->
-          (""""STRING" \(`str1#\d+`\), """ +
+          (""""BIGINT" \(`long1#\d+L`, `long2#\d+L`\), """ +
            """"INT" \(`int1#\d+`, `int2#\d+`, `int3#\d+`, ...\), """ +
-           """"BIGINT" \(`long1#\d+L`, `long2#\d+L`\)""")),
+           """"STRING" \(`str1#\d+`\)""")),
       matchPVals = true)
   }
 
@@ -362,9 +362,10 @@ class DatasetUnpivotSuite extends QueryTest
     checkError(
       exception = e1,
       errorClass = "UNRESOLVED_COLUMN",
+      errorSubClass = Some("WITH_SUGGESTION"),
       parameters = Map(
         "objectName" -> "`1`",
-        "objectList" -> "`id`, `int1`, `str1`, `str2`, `long1`"))
+        "proposal" -> "`id`, `int1`, `str1`, `str2`, `long1`"))
 
     // unpivoting where value column does not exist
     val e2 = intercept[AnalysisException] {
@@ -378,9 +379,10 @@ class DatasetUnpivotSuite extends QueryTest
     checkError(
       exception = e2,
       errorClass = "UNRESOLVED_COLUMN",
+      errorSubClass = Some("WITH_SUGGESTION"),
       parameters = Map(
         "objectName" -> "`does`",
-        "objectList" -> "`id`, `int1`, `long1`, `str1`, `str2`"))
+        "proposal" -> "`id`, `int1`, `long1`, `str1`, `str2`"))
 
     // unpivoting with empty list of value columns
     // where potential value columns are of incompatible types
@@ -396,9 +398,9 @@ class DatasetUnpivotSuite extends QueryTest
       exception = e3,
       errorClass = "UNPIVOT_VALUE_DATA_TYPE_MISMATCH",
       parameters = Map("types" ->
-        (""""INT" \(`id#\d+`, `int1#\d+`\), """ +
-         """"STRING" \(`str1#\d+`, `str2#\d+`\), """ +
-         """"BIGINT" \(`long1#\d+L`\)""")),
+        (""""BIGINT" \(`long1#\d+L`\), """ +
+         """"INT" \(`id#\d+`, `int1#\d+`\), """ +
+         """"STRING" \(`str1#\d+`, `str2#\d+`\)""")),
       matchPVals = true)
 
     // unpivoting with star id columns so that no value columns are left
@@ -429,9 +431,9 @@ class DatasetUnpivotSuite extends QueryTest
       exception = e5,
       errorClass = "UNPIVOT_VALUE_DATA_TYPE_MISMATCH",
       parameters = Map("types" ->
-        (""""INT" \(`id#\d+`, `int1#\d+`\), """ +
-         """"STRING" \(`str1#\d+`, `str2#\d+`\), """ +
-         """"BIGINT" \(`long1#\d+L`\)""")),
+        (""""BIGINT" \(`long1#\d+L`\), """ +
+         """"INT" \(`id#\d+`, `int1#\d+`\), """ +
+         """"STRING" \(`str1#\d+`, `str2#\d+`\)""")),
       matchPVals = true)
 
     // unpivoting without giving values and no non-id columns
@@ -499,10 +501,11 @@ class DatasetUnpivotSuite extends QueryTest
     checkError(
       exception = e,
       errorClass = "UNRESOLVED_COLUMN",
+      errorSubClass = Some("WITH_SUGGESTION"),
       // expected message is wrong: https://issues.apache.org/jira/browse/SPARK-39783
       parameters = Map(
         "objectName" -> "`an`.`id`",
-        "objectList" -> "`an`.`id`, `int1`, `long1`, `str`.`one`, `str`.`two`"))
+        "proposal" -> "`an`.`id`, `int1`, `long1`, `str`.`one`, `str`.`two`"))
   }
 
   test("unpivot with struct fields") {

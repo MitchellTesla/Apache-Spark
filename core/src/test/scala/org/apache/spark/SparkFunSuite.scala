@@ -83,6 +83,8 @@ abstract class SparkFunSuite
 
   protected val enableAutoThreadAudit = true
 
+  protected val regenerateGoldenFiles: Boolean = System.getenv("SPARK_GENERATE_GOLDEN_FILES") == "1"
+
   protected override def beforeAll(): Unit = {
     System.setProperty(IS_TESTING.key, "true")
     if (enableAutoThreadAudit) {
@@ -295,7 +297,8 @@ abstract class SparkFunSuite
       errorSubClass: Option[String] = None,
       sqlState: Option[String] = None,
       parameters: Map[String, String] = Map.empty,
-      matchPVals: Boolean = false): Unit = {
+      matchPVals: Boolean = false,
+      queryContext: Array[QueryContext] = Array.empty): Unit = {
     assert(exception.getErrorClass === errorClass)
     if (exception.getErrorSubClass != null) {
       assert(errorSubClass.isDefined)
@@ -318,6 +321,15 @@ abstract class SparkFunSuite
     } else {
       assert(expectedParameters === parameters)
     }
+    val actualQueryContext = exception.getQueryContext()
+    assert(actualQueryContext.length === queryContext.length, "Invalid length of the query context")
+    actualQueryContext.zip(queryContext).foreach { case (actual, expected) =>
+      assert(actual.objectType() === expected.objectType(), "Invalid objectType of a query context")
+      assert(actual.objectName() === expected.objectName(), "Invalid objectName of a query context")
+      assert(actual.startIndex() === expected.startIndex(), "Invalid startIndex of a query context")
+      assert(actual.stopIndex() === expected.stopIndex(), "Invalid stopIndex of a query context")
+      assert(actual.fragment() === expected.fragment(), "Invalid fragment of a query context")
+    }
   }
 
   protected def checkError(
@@ -334,6 +346,48 @@ abstract class SparkFunSuite
       sqlState: String,
       parameters: Map[String, String]): Unit =
     checkError(exception, errorClass, None, Some(sqlState), parameters)
+
+  protected def checkError(
+      exception: SparkThrowable,
+      errorClass: String,
+      sqlState: String,
+      parameters: Map[String, String],
+      context: QueryContext): Unit =
+    checkError(exception, errorClass, None, Some(sqlState), parameters, false, Array(context))
+
+  protected def checkError(
+      exception: SparkThrowable,
+      errorClass: String,
+      parameters: Map[String, String],
+      context: QueryContext): Unit =
+    checkError(exception, errorClass, None, None, parameters, false, Array(context))
+
+  protected def checkError(
+      exception: SparkThrowable,
+      errorClass: String,
+      errorSubClass: String,
+      sqlState: String,
+      context: QueryContext): Unit =
+    checkError(exception, errorClass, Some(errorSubClass), None, Map.empty, false, Array(context))
+
+  protected def checkError(
+      exception: SparkThrowable,
+      errorClass: String,
+      errorSubClass: String,
+      sqlState: Option[String],
+      parameters: Map[String, String],
+      context: QueryContext): Unit =
+    checkError(exception, errorClass, Some(errorSubClass), sqlState, parameters,
+      false, Array(context))
+
+  protected def checkError(
+      exception: SparkThrowable,
+      errorClass: String,
+      errorSubClass: String,
+      sqlState: String,
+      parameters: Map[String, String],
+      context: QueryContext): Unit =
+    checkError(exception, errorClass, Some(errorSubClass), None, parameters, false, Array(context))
 
   class LogAppender(msg: String = "", maxEvents: Int = 1000)
       extends AbstractAppender("logAppender", null, null, true, Property.EMPTY_ARRAY) {

@@ -12,13 +12,13 @@ sklearn
 matplotlib<3.3.0
 
 # PySpark test dependencies
-xmlrunner
+unittest-xml-reporting
 
 # PySpark test dependencies (optional)
 coverage
 
 # Linter
-mypy
+mypy==0.920
 pytest-mypy-plugins==1.9.3
 flake8==3.9.0
 # See SPARK-38680.

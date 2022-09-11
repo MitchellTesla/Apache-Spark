@@ -1549,6 +1549,8 @@ class SeriesTest(PandasOnSparkTestCase, SQLTestUtils):
         with self.assertRaisesRegex(TypeError, "periods should be an int; however"):
             psser.shift(periods=1.5)
 
+        self.assert_eq(psser.shift(periods=0), pser.shift(periods=0))
+
     def test_diff(self):
         pser = pd.Series([10, 20, 15, 30, 45], name="x")
         psser = ps.Series(pser)
@@ -3324,6 +3326,22 @@ class SeriesTest(PandasOnSparkTestCase, SQLTestUtils):
             NotImplementedError, 'axis should be either 0 or "index" currently.'
         ):
             psser.transform(lambda x: x + 1, axis=1)
+
+    def test_series_stat_fail(self):
+        with self.assertRaisesRegex(TypeError, "Could not convert object"):
+            ps.Series(["a", "b", "c"]).mean()
+        with self.assertRaisesRegex(TypeError, "Could not convert object"):
+            ps.Series(["a", "b", "c"]).skew()
+        with self.assertRaisesRegex(TypeError, "Could not convert object"):
+            ps.Series(["a", "b", "c"]).kurtosis()
+        with self.assertRaisesRegex(TypeError, "Could not convert object"):
+            ps.Series(["a", "b", "c"]).std()
+        with self.assertRaisesRegex(TypeError, "Could not convert object"):
+            ps.Series(["a", "b", "c"]).var()
+        with self.assertRaisesRegex(TypeError, "Could not convert object"):
+            ps.Series(["a", "b", "c"]).median()
+        with self.assertRaisesRegex(TypeError, "Could not convert object"):
+            ps.Series(["a", "b", "c"]).sem()
 
 
 if __name__ == "__main__":

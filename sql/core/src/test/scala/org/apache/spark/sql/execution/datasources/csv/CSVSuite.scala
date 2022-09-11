@@ -2797,13 +2797,13 @@ abstract class CSVSuite
       "inferSchema" -> "true",
       "timestampFormat" -> "yyyy-MM-dd'T'HH:mm:ss",
       "dateFormat" -> "yyyy-MM-dd",
-      "inferDate" -> "true")
+      "prefersDate" -> "true")
     val options2 = Map(
       "header" -> "true",
       "inferSchema" -> "true",
-      "inferDate" -> "true")
+      "prefersDate" -> "true")
 
-    // Error should be thrown when attempting to inferDate with Legacy parser
+    // Error should be thrown when attempting to prefersDate with Legacy parser
     if (SQLConf.get.legacyTimeParserPolicy == LegacyBehaviorPolicy.LEGACY) {
       val msg = intercept[IllegalArgumentException] {
         spark.read
@@ -2836,6 +2836,42 @@ abstract class CSVSuite
               Timestamp.valueOf("2016-01-28 20:00:00.0"))
           )
         assert(results.collect().toSeq.map(_.toSeq) == expected)
+      }
+    }
+  }
+
+  test("SPARK-39904: Parse incorrect timestamp values with prefersDate=true") {
+    withTempPath { path =>
+      Seq(
+        "2020-02-01 12:34:56",
+        "2020-02-02",
+        "invalid"
+      ).toDF()
+        .repartition(1)
+        .write.text(path.getAbsolutePath)
+
+      val schema = new StructType()
+        .add("ts", TimestampType)
+
+      val output = spark.read
+        .schema(schema)
+        .option("prefersDate", "true")
+        .csv(path.getAbsolutePath)
+
+      if (SQLConf.get.legacyTimeParserPolicy == LegacyBehaviorPolicy.LEGACY) {
+        val msg = intercept[IllegalArgumentException] {
+          output.collect()
+        }.getMessage
+        assert(msg.contains("CANNOT_INFER_DATE"))
+      } else {
+        checkAnswer(
+          output,
+          Seq(
+            Row(Timestamp.valueOf("2020-02-01 12:34:56")),
+            Row(Timestamp.valueOf("2020-02-02 00:00:00")),
+            Row(null)
+          )
+        )
       }
     }
   }
@@ -2911,6 +2947,38 @@ abstract class CSVSuite
         output(enableFallback = false),
         Seq(Row(null, null))
       )
+    }
+  }
+
+  test("SPARK-40215: enable parsing fallback for CSV in CORRECTED mode with a SQL config") {
+    withTempPath { path =>
+      Seq("2020-01-01,2020-01-01").toDF()
+        .repartition(1)
+        .write.text(path.getAbsolutePath)
+
+      for (fallbackEnabled <- Seq(true, false)) {
+        withSQLConf(
+            SQLConf.LEGACY_TIME_PARSER_POLICY.key -> "CORRECTED",
+            SQLConf.LEGACY_CSV_ENABLE_DATE_TIME_PARSING_FALLBACK.key -> s"$fallbackEnabled") {
+          val df = spark.read
+            .schema("date date, ts timestamp")
+            .option("dateFormat", "invalid")
+            .option("timestampFormat", "invalid")
+            .csv(path.getAbsolutePath)
+
+          if (fallbackEnabled) {
+            checkAnswer(
+              df,
+              Seq(Row(Date.valueOf("2020-01-01"), Timestamp.valueOf("2020-01-01 00:00:00")))
+            )
+          } else {
+            checkAnswer(
+              df,
+              Seq(Row(null, null))
+            )
+          }
+        }
+      }
     }
   }
 }

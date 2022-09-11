@@ -124,15 +124,19 @@ class UnivocityParser(
   // dates and timestamps.
   // For more information, see comments for "enableDateTimeParsingFallback" option in CSVOptions.
   private val enableParsingFallbackForTimestampType =
-    options.enableDateTimeParsingFallback.getOrElse {
-      SQLConf.get.legacyTimeParserPolicy == SQLConf.LegacyBehaviorPolicy.LEGACY ||
-        options.timestampFormatInRead.isEmpty
-    }
+    options.enableDateTimeParsingFallback
+      .orElse(SQLConf.get.csvEnableDateTimeParsingFallback)
+      .getOrElse {
+        SQLConf.get.legacyTimeParserPolicy == SQLConf.LegacyBehaviorPolicy.LEGACY ||
+          options.timestampFormatInRead.isEmpty
+      }
   private val enableParsingFallbackForDateType =
-    options.enableDateTimeParsingFallback.getOrElse {
-      SQLConf.get.legacyTimeParserPolicy == SQLConf.LegacyBehaviorPolicy.LEGACY ||
-        options.dateFormatInRead.isEmpty
-    }
+    options.enableDateTimeParsingFallback
+      .orElse(SQLConf.get.csvEnableDateTimeParsingFallback)
+      .getOrElse {
+        SQLConf.get.legacyTimeParserPolicy == SQLConf.LegacyBehaviorPolicy.LEGACY ||
+          options.dateFormatInRead.isEmpty
+      }
 
   // Retrieve the raw record string.
   private def getCurrentInput: UTF8String = {
@@ -235,7 +239,7 @@ class UnivocityParser(
         } catch {
           case NonFatal(e) =>
             // There may be date type entries in timestamp column due to schema inference
-            if (options.inferDate) {
+            if (options.prefersDate) {
               daysToMicros(dateFormatter.parse(datum), options.zoneId)
             } else {
               // If fails to parse, then tries the way used in 2.0 and 1.x for backwards
@@ -254,7 +258,7 @@ class UnivocityParser(
         try {
           timestampNTZFormatter.parseWithoutTimeZone(datum, false)
         } catch {
-          case NonFatal(e) if (options.inferDate) =>
+          case NonFatal(e) if options.prefersDate =>
             daysToMicros(dateFormatter.parse(datum), TimeZoneUTC.toZoneId)
         }
       }
