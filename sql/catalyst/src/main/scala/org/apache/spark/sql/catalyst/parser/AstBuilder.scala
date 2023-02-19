@@ -29,9 +29,8 @@ import org.antlr.v4.runtime.tree.{ParseTree, RuleNode, TerminalNode}
 import org.apache.commons.codec.DecoderException
 import org.apache.commons.codec.binary.Hex
 
-import org.apache.spark.SparkException
+import org.apache.spark.{SparkArithmeticException, SparkException}
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, SQLConfHelper, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.catalog.{BucketSpec, CatalogStorageFormat}
@@ -1331,10 +1330,14 @@ class AstBuilder extends SqlBaseParserBaseVisitor[AnyRef] with SQLConfHelper wit
           throw new IllegalStateException(s"Unimplemented joinCriteria: $c")
         case None if ctx.NATURAL != null =>
           if (ctx.LATERAL != null) {
-            throw QueryParsingErrors.lateralJoinWithNaturalJoinUnsupportedError(ctx)
+            throw QueryParsingErrors.incompatibleJoinTypesError(
+              joinType1 = ctx.LATERAL.toString, joinType2 = ctx.NATURAL.toString, ctx = ctx
+            )
           }
           if (baseJoinType == Cross) {
-            throw QueryParsingErrors.naturalCrossJoinUnsupportedError(ctx)
+            throw QueryParsingErrors.incompatibleJoinTypesError(
+              joinType1 = ctx.NATURAL.toString, joinType2 = baseJoinType.toString, ctx = ctx
+            )
           }
           (NaturalJoin(baseJoinType), None)
         case None =>
@@ -2600,7 +2603,7 @@ class AstBuilder extends SqlBaseParserBaseVisitor[AnyRef] with SQLConfHelper wit
     try {
       Literal(BigDecimal(raw).underlying())
     } catch {
-      case e: AnalysisException =>
+      case e: SparkArithmeticException =>
         throw new ParseException(
           errorClass = "_LEGACY_ERROR_TEMP_0061",
           messageParameters = Map("msg" -> e.getMessage),
@@ -2889,6 +2892,8 @@ class AstBuilder extends SqlBaseParserBaseVisitor[AnyRef] with SQLConfHelper wit
       case ("interval", Nil) => CalendarIntervalType
       case (dt @ ("character" | "char" | "varchar"), Nil) =>
         throw QueryParsingErrors.charTypeMissingLengthError(dt, ctx)
+      case (dt @ ("array" | "struct" | "map"), Nil) =>
+        throw QueryParsingErrors.nestedTypeMissingElementTypeError(dt, ctx)
       case (dt, params) =>
         val dtStr = if (params.nonEmpty) s"$dt(${params.mkString(",")})" else dt
         throw QueryParsingErrors.dataTypeUnsupportedError(dtStr, ctx)
@@ -4383,7 +4388,7 @@ class AstBuilder extends SqlBaseParserBaseVisitor[AnyRef] with SQLConfHelper wit
    *
    * For example:
    * {{{
-   *   MSCK REPAIR TABLE multi_part_name [{ADD|DROP|SYNC} PARTITIONS]
+   *   [MSCK] REPAIR TABLE multi_part_name [{ADD|DROP|SYNC} PARTITIONS]
    * }}}
    */
   override def visitRepairTable(ctx: RepairTableContext): LogicalPlan = withOrigin(ctx) {

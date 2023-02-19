@@ -30,6 +30,7 @@ Classes
 
     PySparkException
     AnalysisException
+    TempTableAlreadyExistsException
     ParseException
     IllegalArgumentException
     StreamingQueryException
