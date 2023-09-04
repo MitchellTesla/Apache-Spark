@@ -42,8 +42,7 @@ from pyspark.ml.connect.io_utils import (
 )
 from pyspark.ml.param import Params, Param, TypeConverters
 from pyspark.ml.param.shared import HasParallelism, HasSeed
-from pyspark.sql.functions import col, lit, rand, UserDefinedFunction
-from pyspark.sql.types import BooleanType
+from pyspark.sql.functions import col, lit, rand
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql import SparkSession
 
@@ -178,11 +177,12 @@ def _parallelFitTasks(
 
     def get_single_task(index: int, param_map: Any) -> Callable[[], Tuple[int, float]]:
         def single_task() -> Tuple[int, float]:
-            # Active session is thread-local variable, in background thread the active session
-            # is not set, the following line sets it as the main thread active session.
-            active_session._jvm.SparkSession.setActiveSession(  # type: ignore[union-attr]
-                active_session._jsparkSession  # type: ignore[union-attr]
-            )
+            if not is_remote():
+                # Active session is thread-local variable, in background thread the active session
+                # is not set, the following line sets it as the main thread active session.
+                active_session._jvm.SparkSession.setActiveSession(  # type: ignore[union-attr]
+                    active_session._jsparkSession  # type: ignore[union-attr]
+                )
 
             model = estimator.fit(train, param_map)
             metric = evaluator.evaluate(
@@ -274,7 +274,6 @@ class CrossValidator(
     _CrossValidatorReadWrite,
 ):
     """
-
     K-fold cross validation performs model selection by splitting the dataset into a set of
     non-overlapping randomly partitioned folds which are used as separate training and test datasets
     e.g., with k=3 folds, K-fold cross validation will generate 3 (training, test) dataset pairs,
@@ -282,6 +281,29 @@ class CrossValidator(
     test set exactly once.
 
     .. versionadded:: 3.5.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.connect.tuning import CrossValidator
+    >>> from pyspark.ml.connect.classification import LogisticRegression
+    >>> from pyspark.ml.connect.evaluation import BinaryClassificationEvaluator
+    >>> from pyspark.ml.tuning import ParamGridBuilder
+    >>> from sklearn.datasets import load_breast_cancer
+    >>> lor = LogisticRegression(maxIter=20, learningRate=0.01)
+    >>> ev = BinaryClassificationEvaluator()
+    >>> grid = ParamGridBuilder().addGrid(lor.maxIter, [2, 20]).build()
+    >>> cv = CrossValidator(estimator=lor, evaluator=ev, estimatorParamMaps=grid)
+    >>> sk_dataset = load_breast_cancer()
+    >>> train_dataset = spark.createDataFrame(
+    ...     zip(sk_dataset.data.tolist(), [int(t) for t in sk_dataset.target]),
+    ...     schema="features: array<double>, label: long",
+    ... )
+    >>> cv_model = cv.fit(train_dataset)
+    >>> transformed_dataset = cv_model.transform(train_dataset.limit(10))
+    >>> cv_model.avgMetrics
+    [0.5527792527167658, 0.8348714668615984]
+    >>> cv_model.stdMetrics
+    [0.04902833489813031, 0.05247132866444953]
     """
 
     _input_kwargs: Dict[str, Any]
@@ -454,23 +476,14 @@ class CrossValidator(
                 train = df.filter(~condition)
                 datasets.append((train, validation))
         else:
-            # Use user-specified fold numbers.
-            def checker(foldNum: int) -> bool:
-                if foldNum < 0 or foldNum >= nFolds:
-                    raise ValueError(
-                        "Fold number must be in range [0, %s), but got %s." % (nFolds, foldNum)
-                    )
-                return True
-
-            checker_udf = UserDefinedFunction(checker, BooleanType())
+            # TODO:
+            #  Add verification that foldCol column values are in range [0, nFolds)
             for i in range(nFolds):
-                training = dataset.filter(checker_udf(dataset[foldCol]) & (col(foldCol) != lit(i)))
-                validation = dataset.filter(
-                    checker_udf(dataset[foldCol]) & (col(foldCol) == lit(i))
-                )
-                if training.rdd.getNumPartitions() == 0 or len(training.take(1)) == 0:
+                training = dataset.filter(col(foldCol) != lit(i))
+                validation = dataset.filter(col(foldCol) == lit(i))
+                if training.isEmpty():
                     raise ValueError("The training data at fold %s is empty." % i)
-                if validation.rdd.getNumPartitions() == 0 or len(validation.take(1)) == 0:
+                if validation.isEmpty():
                     raise ValueError("The validation data at fold %s is empty." % i)
                 datasets.append((training, validation))
 
