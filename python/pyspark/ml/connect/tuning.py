@@ -16,7 +16,6 @@
 #
 
 from multiprocessing.pool import ThreadPool
-
 from typing import (
     Any,
     Callable,
@@ -45,7 +44,6 @@ from pyspark.ml.param.shared import HasParallelism, HasSeed
 from pyspark.sql.functions import col, lit, rand
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql import SparkSession
-
 from pyspark.sql.utils import is_remote
 
 
@@ -181,7 +179,7 @@ def _parallelFitTasks(
                 # Active session is thread-local variable, in background thread the active session
                 # is not set, the following line sets it as the main thread active session.
                 active_session._jvm.SparkSession.setActiveSession(  # type: ignore[union-attr]
-                    active_session._jsparkSession  # type: ignore[union-attr]
+                    active_session._jsparkSession
                 )
 
             model = estimator.fit(train, param_map)

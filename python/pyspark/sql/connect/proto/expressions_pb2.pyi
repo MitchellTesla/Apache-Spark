@@ -309,9 +309,32 @@ class Expression(google.protobuf.message.Message):
     class Cast(google.protobuf.message.Message):
         DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
+        class _EvalMode:
+            ValueType = typing.NewType("ValueType", builtins.int)
+            V: typing_extensions.TypeAlias = ValueType
+
+        class _EvalModeEnumTypeWrapper(
+            google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
+                Expression.Cast._EvalMode.ValueType
+            ],
+            builtins.type,
+        ):  # noqa: F821
+            DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+            EVAL_MODE_UNSPECIFIED: Expression.Cast._EvalMode.ValueType  # 0
+            EVAL_MODE_LEGACY: Expression.Cast._EvalMode.ValueType  # 1
+            EVAL_MODE_ANSI: Expression.Cast._EvalMode.ValueType  # 2
+            EVAL_MODE_TRY: Expression.Cast._EvalMode.ValueType  # 3
+
+        class EvalMode(_EvalMode, metaclass=_EvalModeEnumTypeWrapper): ...
+        EVAL_MODE_UNSPECIFIED: Expression.Cast.EvalMode.ValueType  # 0
+        EVAL_MODE_LEGACY: Expression.Cast.EvalMode.ValueType  # 1
+        EVAL_MODE_ANSI: Expression.Cast.EvalMode.ValueType  # 2
+        EVAL_MODE_TRY: Expression.Cast.EvalMode.ValueType  # 3
+
         EXPR_FIELD_NUMBER: builtins.int
         TYPE_FIELD_NUMBER: builtins.int
         TYPE_STR_FIELD_NUMBER: builtins.int
+        EVAL_MODE_FIELD_NUMBER: builtins.int
         @property
         def expr(self) -> global___Expression:
             """(Required) the expression to be casted."""
@@ -319,12 +342,15 @@ class Expression(google.protobuf.message.Message):
         def type(self) -> pyspark.sql.connect.proto.types_pb2.DataType: ...
         type_str: builtins.str
         """If this is set, Server will use Catalyst parser to parse this string to DataType."""
+        eval_mode: global___Expression.Cast.EvalMode.ValueType
+        """(Optional) The expression evaluation mode."""
         def __init__(
             self,
             *,
             expr: global___Expression | None = ...,
             type: pyspark.sql.connect.proto.types_pb2.DataType | None = ...,
             type_str: builtins.str = ...,
+            eval_mode: global___Expression.Cast.EvalMode.ValueType = ...,
         ) -> None: ...
         def HasField(
             self,
@@ -344,6 +370,8 @@ class Expression(google.protobuf.message.Message):
             field_name: typing_extensions.Literal[
                 "cast_to_type",
                 b"cast_to_type",
+                "eval_mode",
+                b"eval_mode",
                 "expr",
                 b"expr",
                 "type",
@@ -718,28 +746,31 @@ class Expression(google.protobuf.message.Message):
         ) -> None: ...
         def WhichOneof(
             self, oneof_group: typing_extensions.Literal["literal_type", b"literal_type"]
-        ) -> typing_extensions.Literal[
-            "null",
-            "binary",
-            "boolean",
-            "byte",
-            "short",
-            "integer",
-            "long",
-            "float",
-            "double",
-            "decimal",
-            "string",
-            "date",
-            "timestamp",
-            "timestamp_ntz",
-            "calendar_interval",
-            "year_month_interval",
-            "day_time_interval",
-            "array",
-            "map",
-            "struct",
-        ] | None: ...
+        ) -> (
+            typing_extensions.Literal[
+                "null",
+                "binary",
+                "boolean",
+                "byte",
+                "short",
+                "integer",
+                "long",
+                "float",
+                "double",
+                "decimal",
+                "string",
+                "date",
+                "timestamp",
+                "timestamp_ntz",
+                "calendar_interval",
+                "year_month_interval",
+                "day_time_interval",
+                "array",
+                "map",
+                "struct",
+            ]
+            | None
+        ): ...
 
     class UnresolvedAttribute(google.protobuf.message.Message):
         """An unresolved attribute that is not explicitly bound to a specific column, but the column
@@ -877,29 +908,52 @@ class Expression(google.protobuf.message.Message):
         DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
         UNPARSED_TARGET_FIELD_NUMBER: builtins.int
+        PLAN_ID_FIELD_NUMBER: builtins.int
         unparsed_target: builtins.str
         """(Optional) The target of the expansion.
 
         If set, it should end with '.*' and will be parsed by 'parseAttributeName'
         in the server side.
         """
+        plan_id: builtins.int
+        """(Optional) The id of corresponding connect plan."""
         def __init__(
             self,
             *,
             unparsed_target: builtins.str | None = ...,
+            plan_id: builtins.int | None = ...,
         ) -> None: ...
         def HasField(
             self,
             field_name: typing_extensions.Literal[
-                "_unparsed_target", b"_unparsed_target", "unparsed_target", b"unparsed_target"
+                "_plan_id",
+                b"_plan_id",
+                "_unparsed_target",
+                b"_unparsed_target",
+                "plan_id",
+                b"plan_id",
+                "unparsed_target",
+                b"unparsed_target",
             ],
         ) -> builtins.bool: ...
         def ClearField(
             self,
             field_name: typing_extensions.Literal[
-                "_unparsed_target", b"_unparsed_target", "unparsed_target", b"unparsed_target"
+                "_plan_id",
+                b"_plan_id",
+                "_unparsed_target",
+                b"_unparsed_target",
+                "plan_id",
+                b"plan_id",
+                "unparsed_target",
+                b"unparsed_target",
             ],
         ) -> None: ...
+        @typing.overload
+        def WhichOneof(
+            self, oneof_group: typing_extensions.Literal["_plan_id", b"_plan_id"]
+        ) -> typing_extensions.Literal["plan_id"] | None: ...
+        @typing.overload
         def WhichOneof(
             self, oneof_group: typing_extensions.Literal["_unparsed_target", b"_unparsed_target"]
         ) -> typing_extensions.Literal["unparsed_target"] | None: ...
@@ -1279,26 +1333,29 @@ class Expression(google.protobuf.message.Message):
     ) -> None: ...
     def WhichOneof(
         self, oneof_group: typing_extensions.Literal["expr_type", b"expr_type"]
-    ) -> typing_extensions.Literal[
-        "literal",
-        "unresolved_attribute",
-        "unresolved_function",
-        "expression_string",
-        "unresolved_star",
-        "alias",
-        "cast",
-        "unresolved_regex",
-        "sort_order",
-        "lambda_function",
-        "window",
-        "unresolved_extract_value",
-        "update_fields",
-        "unresolved_named_lambda_variable",
-        "common_inline_user_defined_function",
-        "call_function",
-        "named_argument_expression",
-        "extension",
-    ] | None: ...
+    ) -> (
+        typing_extensions.Literal[
+            "literal",
+            "unresolved_attribute",
+            "unresolved_function",
+            "expression_string",
+            "unresolved_star",
+            "alias",
+            "cast",
+            "unresolved_regex",
+            "sort_order",
+            "lambda_function",
+            "window",
+            "unresolved_extract_value",
+            "update_fields",
+            "unresolved_named_lambda_variable",
+            "common_inline_user_defined_function",
+            "call_function",
+            "named_argument_expression",
+            "extension",
+        ]
+        | None
+    ): ...
 
 global___Expression = Expression
 

@@ -18,15 +18,17 @@
 package org.apache.spark.sql.connect.client
 
 import java.net.URI
-import java.util.UUID
+import java.util.{Locale, UUID}
 import java.util.concurrent.Executor
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.jdk.CollectionConverters._
+import scala.util.Properties
 
 import com.google.protobuf.ByteString
 import io.grpc._
 
+import org.apache.spark.SparkBuildInfo.{spark_version => SPARK_VERSION}
 import org.apache.spark.connect.proto
 import org.apache.spark.connect.proto.UserContext
 import org.apache.spark.sql.connect.common.ProtoUtils
@@ -41,8 +43,11 @@ private[sql] class SparkConnectClient(
 
   private val userContext: UserContext = configuration.userContext
 
-  private[this] val bstub = new CustomSparkConnectBlockingStub(channel, configuration.retryPolicy)
-  private[this] val stub = new CustomSparkConnectStub(channel, configuration.retryPolicy)
+  private[this] val stubState = new SparkConnectStubState(channel, configuration.retryPolicies)
+  private[this] val bstub =
+    new CustomSparkConnectBlockingStub(channel, stubState)
+  private[this] val stub =
+    new CustomSparkConnectStub(channel, stubState)
 
   private[client] def userAgent: String = configuration.userAgent
 
@@ -58,6 +63,14 @@ private[sql] class SparkConnectClient(
   // a new client will create a new session ID.
   private[sql] val sessionId: String = configuration.sessionId.getOrElse(UUID.randomUUID.toString)
 
+  /**
+   * Hijacks the stored server side session ID with the given suffix. Used for testing to make
+   * sure that server is validating the session ID.
+   */
+  private[sql] def hijackServerSideSessionIdForTesting(suffix: String) = {
+    stubState.responseValidator.hijackServerSideSessionIdForTesting(suffix)
+  }
+
   private[sql] val artifactManager: ArtifactManager = {
     new ArtifactManager(configuration, sessionId, bstub, stub)
   }
@@ -67,6 +80,14 @@ private[sql] class SparkConnectClient(
    */
   private[sql] def uploadAllClassFileArtifacts(): Unit =
     artifactManager.uploadAllClassFileArtifacts()
+
+  /**
+   * Returns the server-side session id obtained from the first request, if there was a request
+   * already.
+   */
+  private def serverSideSessionId: Option[String] = {
+    stubState.responseValidator.getServerSideSessionId
+  }
 
   /**
    * Dispatch the [[proto.AnalyzePlanRequest]] to the Spark Connect server.
@@ -94,11 +115,11 @@ private[sql] class SparkConnectClient(
       .setSessionId(sessionId)
       .setClientType(userAgent)
       .addAllTags(tags.get.toSeq.asJava)
-      .build()
+    serverSideSessionId.foreach(session => request.setClientObservedServerSideSessionId(session))
     if (configuration.useReattachableExecute) {
-      bstub.executePlanReattachable(request)
+      bstub.executePlanReattachable(request.build())
     } else {
-      bstub.executePlan(request)
+      bstub.executePlan(request.build())
     }
   }
 
@@ -114,8 +135,8 @@ private[sql] class SparkConnectClient(
       .setSessionId(sessionId)
       .setClientType(userAgent)
       .setUserContext(userContext)
-      .build()
-    bstub.config(request)
+    serverSideSessionId.foreach(session => request.setClientObservedServerSideSessionId(session))
+    bstub.config(request.build())
   }
 
   /**
@@ -202,8 +223,8 @@ private[sql] class SparkConnectClient(
       .setUserContext(userContext)
       .setSessionId(sessionId)
       .setClientType(userAgent)
-      .build()
-    analyze(request)
+    serverSideSessionId.foreach(session => request.setClientObservedServerSideSessionId(session))
+    analyze(request.build())
   }
 
   private[sql] def interruptAll(): proto.InterruptResponse = {
@@ -213,8 +234,8 @@ private[sql] class SparkConnectClient(
       .setSessionId(sessionId)
       .setClientType(userAgent)
       .setInterruptType(proto.InterruptRequest.InterruptType.INTERRUPT_TYPE_ALL)
-      .build()
-    bstub.interrupt(request)
+    serverSideSessionId.foreach(session => request.setClientObservedServerSideSessionId(session))
+    bstub.interrupt(request.build())
   }
 
   private[sql] def interruptTag(tag: String): proto.InterruptResponse = {
@@ -225,8 +246,8 @@ private[sql] class SparkConnectClient(
       .setClientType(userAgent)
       .setInterruptType(proto.InterruptRequest.InterruptType.INTERRUPT_TYPE_TAG)
       .setOperationTag(tag)
-      .build()
-    bstub.interrupt(request)
+    serverSideSessionId.foreach(session => request.setClientObservedServerSideSessionId(session))
+    bstub.interrupt(request.build())
   }
 
   private[sql] def interruptOperation(id: String): proto.InterruptResponse = {
@@ -237,8 +258,17 @@ private[sql] class SparkConnectClient(
       .setClientType(userAgent)
       .setInterruptType(proto.InterruptRequest.InterruptType.INTERRUPT_TYPE_OPERATION_ID)
       .setOperationId(id)
-      .build()
-    bstub.interrupt(request)
+    serverSideSessionId.foreach(session => request.setClientObservedServerSideSessionId(session))
+    bstub.interrupt(request.build())
+  }
+
+  private[sql] def releaseSession(): proto.ReleaseSessionResponse = {
+    val builder = proto.ReleaseSessionRequest.newBuilder()
+    val request = builder
+      .setUserContext(userContext)
+      .setSessionId(sessionId)
+      .setClientType(userAgent)
+    bstub.releaseSession(request.build())
   }
 
   private[this] val tags = new InheritableThreadLocal[mutable.Set[String]] {
@@ -285,6 +315,43 @@ private[sql] class SparkConnectClient(
    * Currently only local files with extensions .jar and .class are supported.
    */
   def addArtifact(uri: URI): Unit = artifactManager.addArtifact(uri)
+
+  /**
+   * Add a single in-memory artifact to the session while preserving the directory structure
+   * specified by `target` under the session's working directory of that particular file
+   * extension.
+   *
+   * Supported target file extensions are .jar and .class.
+   *
+   * ==Example==
+   * {{{
+   *  addArtifact(bytesBar, "foo/bar.class")
+   *  addArtifact(bytesFlat, "flat.class")
+   *  // Directory structure of the session's working directory for class files would look like:
+   *  // ${WORKING_DIR_FOR_CLASS_FILES}/flat.class
+   *  // ${WORKING_DIR_FOR_CLASS_FILES}/foo/bar.class
+   * }}}
+   */
+  def addArtifact(bytes: Array[Byte], target: String): Unit =
+    artifactManager.addArtifact(bytes, target)
+
+  /**
+   * Add a single artifact to the session while preserving the directory structure specified by
+   * `target` under the session's working directory of that particular file extension.
+   *
+   * Supported target file extensions are .jar and .class.
+   *
+   * ==Example==
+   * {{{
+   *  addArtifact("/Users/dummyUser/files/foo/bar.class", "foo/bar.class")
+   *  addArtifact("/Users/dummyUser/files/flat.class", "flat.class")
+   *  // Directory structure of the session's working directory for class files would look like:
+   *  // ${WORKING_DIR_FOR_CLASS_FILES}/flat.class
+   *  // ${WORKING_DIR_FOR_CLASS_FILES}/foo/bar.class
+   * }}}
+   */
+  def addArtifact(source: String, target: String): Unit =
+    artifactManager.addArtifact(source, target)
 
   /**
    * Add multiple artifacts to the session.
@@ -428,9 +495,13 @@ object SparkConnectClient {
 
     def sslEnabled: Boolean = _configuration.isSslEnabled.contains(true)
 
-    def retryPolicy(policy: GrpcRetryHandler.RetryPolicy): Builder = {
-      _configuration = _configuration.copy(retryPolicy = policy)
+    def retryPolicy(policies: Seq[RetryPolicy]): Builder = {
+      _configuration = _configuration.copy(retryPolicies = policies)
       this
+    }
+
+    def retryPolicy(policy: RetryPolicy): Builder = {
+      retryPolicy(List(policy))
     }
 
     private object URIParams {
@@ -439,6 +510,7 @@ object SparkConnectClient {
       val PARAM_TOKEN = "token"
       val PARAM_USER_AGENT = "user_agent"
       val PARAM_SESSION_ID = "session_id"
+      val PARAM_GRPC_MAX_MESSAGE_SIZE = "grpc_max_message_size"
     }
 
     private def verifyURI(uri: URI): Unit = {
@@ -466,7 +538,7 @@ object SparkConnectClient {
 
     def userAgent(value: String): Builder = {
       require(value != null)
-      _configuration = _configuration.copy(userAgent = value)
+      _configuration = _configuration.copy(userAgent = genUserAgent(value))
       this
     }
 
@@ -486,6 +558,20 @@ object SparkConnectClient {
     def sessionId: Option[String] = _configuration.sessionId
 
     def userAgent: String = _configuration.userAgent
+
+    def grpcMaxMessageSize(messageSize: Int): Builder = {
+      _configuration = _configuration.copy(grpcMaxMessageSize = messageSize)
+      this
+    }
+
+    def grpcMaxMessageSize: Int = _configuration.grpcMaxMessageSize
+
+    def grpcMaxRecursionLimit(recursionLimit: Int): Builder = {
+      _configuration = _configuration.copy(grpcMaxRecursionLimit = recursionLimit)
+      this
+    }
+
+    def grpcMaxRecursionLimit: Int = _configuration.grpcMaxRecursionLimit
 
     def option(key: String, value: String): Builder = {
       _configuration = _configuration.copy(metadata = _configuration.metadata + ((key, value)))
@@ -513,6 +599,7 @@ object SparkConnectClient {
           case URIParams.PARAM_USE_SSL =>
             if (java.lang.Boolean.valueOf(value)) enableSsl() else disableSsl()
           case URIParams.PARAM_SESSION_ID => sessionId(value)
+          case URIParams.PARAM_GRPC_MAX_MESSAGE_SIZE => grpcMaxMessageSize(value.toInt)
           case _ => option(key, value)
         }
       }
@@ -586,6 +673,27 @@ object SparkConnectClient {
   }
 
   /**
+   * Appends the Spark, Scala & JVM version, and the used OS to the user-provided user agent.
+   */
+  private def genUserAgent(value: String): String = {
+    val scalaVersion = Properties.versionNumberString
+    val jvmVersion = System.getProperty("java.version").split("_")(0)
+    val osName = {
+      val os = System.getProperty("os.name").toLowerCase(Locale.ROOT)
+      if (os.contains("mac")) "darwin"
+      else if (os.contains("linux")) "linux"
+      else if (os.contains("win")) "windows"
+      else "unknown"
+    }
+    List(
+      value,
+      s"spark/$SPARK_VERSION",
+      s"scala/$scalaVersion",
+      s"jvm/$jvmVersion",
+      s"os/$osName").mkString(" ")
+  }
+
+  /**
    * Helper class that fully captures the configuration for a [[SparkConnectClient]].
    */
   private[sql] case class Configuration(
@@ -596,11 +704,14 @@ object SparkConnectClient {
       token: Option[String] = None,
       isSslEnabled: Option[Boolean] = None,
       metadata: Map[String, String] = Map.empty,
-      userAgent: String = DEFAULT_USER_AGENT,
-      retryPolicy: GrpcRetryHandler.RetryPolicy = GrpcRetryHandler.RetryPolicy(),
+      userAgent: String = genUserAgent(
+        sys.env.getOrElse("SPARK_CONNECT_USER_AGENT", DEFAULT_USER_AGENT)),
+      retryPolicies: Seq[RetryPolicy] = RetryPolicy.defaultPolicies(),
       useReattachableExecute: Boolean = true,
       interceptors: List[ClientInterceptor] = List.empty,
-      sessionId: Option[String] = None) {
+      sessionId: Option[String] = None,
+      grpcMaxMessageSize: Int = ConnectCommon.CONNECT_GRPC_MAX_MESSAGE_SIZE,
+      grpcMaxRecursionLimit: Int = ConnectCommon.CONNECT_GRPC_MARSHALLER_RECURSION_LIMIT) {
 
     def userContext: proto.UserContext = {
       val builder = proto.UserContext.newBuilder()
@@ -638,7 +749,7 @@ object SparkConnectClient {
 
       interceptors.foreach(channelBuilder.intercept(_))
 
-      channelBuilder.maxInboundMessageSize(ConnectCommon.CONNECT_GRPC_MAX_MESSAGE_SIZE)
+      channelBuilder.maxInboundMessageSize(grpcMaxMessageSize)
       channelBuilder.build()
     }
 

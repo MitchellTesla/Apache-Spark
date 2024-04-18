@@ -41,7 +41,7 @@ abstract class PlanExpression[T <: QueryPlan[_]] extends Expression {
     bits
   }
 
-  final override val nodePatterns: Seq[TreePattern] = Seq(PLAN_EXPRESSION) ++ nodePatternsInternal
+  final override val nodePatterns: Seq[TreePattern] = Seq(PLAN_EXPRESSION) ++ nodePatternsInternal()
 
   override lazy val deterministic: Boolean = children.forall(_.deterministic) &&
     plan.deterministic
@@ -83,6 +83,7 @@ abstract class SubqueryExpression(
     AttributeSet.fromAttributeSets(outerAttrs.map(_.references))
   override def children: Seq[Expression] = outerAttrs ++ joinCond
   override def withNewPlan(plan: LogicalPlan): SubqueryExpression
+  def withNewOuterAttrs(outerAttrs: Seq[Expression]): SubqueryExpression
   def isCorrelated: Boolean = outerAttrs.nonEmpty
   def hint: Option[HintInfo]
   def withNewHint(hint: Option[HintInfo]): SubqueryExpression
@@ -279,6 +280,8 @@ case class ScalarSubquery(
   }
   override def nullable: Boolean = true
   override def withNewPlan(plan: LogicalPlan): ScalarSubquery = copy(plan = plan)
+  override def withNewOuterAttrs(outerAttrs: Seq[Expression]): ScalarSubquery = copy(
+    outerAttrs = outerAttrs)
   override def withNewHint(hint: Option[HintInfo]): ScalarSubquery = copy(hint = hint)
   override def toString: String = s"scalar-subquery#${exprId.id} $conditionString"
   override lazy val canonicalized: Expression = {
@@ -295,7 +298,7 @@ case class ScalarSubquery(
       outerAttrs = newChildren.take(outerAttrs.size),
       joinCond = newChildren.drop(outerAttrs.size))
 
-  final override def nodePatternsInternal: Seq[TreePattern] = Seq(SCALAR_SUBQUERY)
+  final override def nodePatternsInternal(): Seq[TreePattern] = Seq(SCALAR_SUBQUERY)
 }
 
 object ScalarSubquery {
@@ -323,6 +326,8 @@ case class LateralSubquery(
   override def dataType: DataType = plan.output.toStructType
   override def nullable: Boolean = true
   override def withNewPlan(plan: LogicalPlan): LateralSubquery = copy(plan = plan)
+  override def withNewOuterAttrs(outerAttrs: Seq[Expression]): LateralSubquery = copy(
+    outerAttrs = outerAttrs)
   override def withNewHint(hint: Option[HintInfo]): LateralSubquery = copy(hint = hint)
   override def toString: String = s"lateral-subquery#${exprId.id} $conditionString"
   override lazy val canonicalized: Expression = {
@@ -339,7 +344,7 @@ case class LateralSubquery(
       outerAttrs = newChildren.take(outerAttrs.size),
       joinCond = newChildren.drop(outerAttrs.size))
 
-  final override def nodePatternsInternal: Seq[TreePattern] = Seq(LATERAL_SUBQUERY)
+  final override def nodePatternsInternal(): Seq[TreePattern] = Seq(LATERAL_SUBQUERY)
 }
 
 /**
@@ -381,6 +386,8 @@ case class ListQuery(
     false
   }
   override def withNewPlan(plan: LogicalPlan): ListQuery = copy(plan = plan)
+  override def withNewOuterAttrs(outerAttrs: Seq[Expression]): ListQuery = copy(
+    outerAttrs = outerAttrs)
   override def withNewHint(hint: Option[HintInfo]): ListQuery = copy(hint = hint)
   override def toString: String = s"list#${exprId.id} $conditionString"
   override lazy val canonicalized: Expression = {
@@ -397,7 +404,7 @@ case class ListQuery(
       outerAttrs = newChildren.take(outerAttrs.size),
       joinCond = newChildren.drop(outerAttrs.size))
 
-  final override def nodePatternsInternal: Seq[TreePattern] = Seq(LIST_SUBQUERY)
+  final override def nodePatternsInternal(): Seq[TreePattern] = Seq(LIST_SUBQUERY)
 }
 
 /**
@@ -437,6 +444,8 @@ case class Exists(
   with Unevaluable {
   override def nullable: Boolean = false
   override def withNewPlan(plan: LogicalPlan): Exists = copy(plan = plan)
+  override def withNewOuterAttrs(outerAttrs: Seq[Expression]): Exists = copy(
+    outerAttrs = outerAttrs)
   override def withNewHint(hint: Option[HintInfo]): Exists = copy(hint = hint)
   override def toString: String = s"exists#${exprId.id} $conditionString"
   override lazy val canonicalized: Expression = {
@@ -452,5 +461,5 @@ case class Exists(
       outerAttrs = newChildren.take(outerAttrs.size),
       joinCond = newChildren.drop(outerAttrs.size))
 
-  final override def nodePatternsInternal: Seq[TreePattern] = Seq(EXISTS_SUBQUERY)
+  final override def nodePatternsInternal(): Seq[TreePattern] = Seq(EXISTS_SUBQUERY)
 }

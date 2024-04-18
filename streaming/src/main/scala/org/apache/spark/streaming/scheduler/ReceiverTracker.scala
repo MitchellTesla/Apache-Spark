@@ -24,7 +24,8 @@ import scala.concurrent.ExecutionContext
 import scala.util.{Failure, Success}
 
 import org.apache.spark._
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.{ERROR, STREAM_ID}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.rpc._
 import org.apache.spark.scheduler.{ExecutorCacheTaskLocation, TaskLocation}
@@ -32,6 +33,7 @@ import org.apache.spark.streaming.{StreamingContext, Time}
 import org.apache.spark.streaming.receiver._
 import org.apache.spark.streaming.util.WriteAheadLogUtils
 import org.apache.spark.util.{SerializableConfiguration, ThreadUtils, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 
 /** Enumeration to identify current state of a Receiver */
@@ -108,7 +110,7 @@ class ReceiverTracker(ssc: StreamingContext, skipReceiverLaunch: Boolean = false
   private val receivedBlockTracker = new ReceivedBlockTracker(
     ssc.sparkContext.conf,
     ssc.sparkContext.hadoopConfiguration,
-    receiverInputStreamIds,
+    receiverInputStreamIds.toImmutableArraySeq,
     ssc.scheduler.clock,
     ssc.isCheckpointPresent,
     Option(ssc.checkpointDir)
@@ -244,11 +246,11 @@ class ReceiverTracker(ssc: StreamingContext, skipReceiverLaunch: Boolean = false
    */
   def allocatedExecutors(): Map[Int, Option[String]] = synchronized {
     if (isTrackerStarted) {
-      endpoint.askSync[Map[Int, ReceiverTrackingInfo]](GetAllReceiverInfo).mapValues {
-        _.runningExecutor.map {
+      endpoint.askSync[Map[Int, ReceiverTrackingInfo]](GetAllReceiverInfo).transform { (_, v) =>
+        v.runningExecutor.map {
           _.executorId
         }
-      }.toMap
+      }
     } else {
       Map.empty
     }
@@ -329,7 +331,8 @@ class ReceiverTracker(ssc: StreamingContext, skipReceiverLaunch: Boolean = false
     } else {
       s"$message"
     }
-    logError(s"Deregistered receiver for stream $streamId: $messageWithError")
+    logError(log"Deregistered receiver for stream ${MDC(STREAM_ID, streamId)}: " +
+      log"${MDC(ERROR, messageWithError)}")
   }
 
   /** Update a receiver's maximum ingestion rate */
@@ -443,7 +446,7 @@ class ReceiverTracker(ssc: StreamingContext, skipReceiverLaunch: Boolean = false
     runDummySparkJob()
 
     logInfo("Starting " + receivers.length + " receivers")
-    endpoint.send(StartAllReceivers(receivers))
+    endpoint.send(StartAllReceivers(receivers.toImmutableArraySeq))
   }
 
   /** Check if tracker has been marked for starting */

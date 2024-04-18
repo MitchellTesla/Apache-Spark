@@ -16,34 +16,58 @@
  */
 package org.apache.spark.sql.catalyst.xml
 
-import java.nio.file.Paths
+import java.io.{File, FileInputStream, InputStream}
 import javax.xml.XMLConstants
+import javax.xml.transform.stream.StreamSource
 import javax.xml.validation.{Schema, SchemaFactory}
 
 import com.google.common.cache.{CacheBuilder, CacheLoader}
+import org.apache.hadoop.fs.Path
 
 import org.apache.spark.SparkFiles
+import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKey._
+import org.apache.spark.internal.MDC
 
 /**
  * Utilities for working with XSD validation.
  */
-private[sql] object ValidatorUtil {
-
+object ValidatorUtil extends Logging {
   // Parsing XSDs may be slow, so cache them by path:
 
   private val cache = CacheBuilder.newBuilder().softValues().build(
     new CacheLoader[String, Schema] {
       override def load(key: String): Schema = {
-        // Handle case where file exists as specified
-        var path = Paths.get(key)
-        if (!path.toFile.exists()) {
-          // Handle case where it was added with sc.addFile
-          path = Paths.get(SparkFiles.get(key))
+        val in = openSchemaFile(new Path(key))
+        try {
+          val schemaFactory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI)
+          schemaFactory.newSchema(new StreamSource(in))
+        } finally {
+          in.close()
         }
-        val schemaFactory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI)
-        schemaFactory.newSchema(path.toFile)
       }
     })
+
+  def openSchemaFile(xsdPath: Path): InputStream = {
+    try {
+      // Handle case where file exists as specified
+      val fs = xsdPath.getFileSystem(SparkHadoopUtil.get.conf)
+      fs.open(xsdPath)
+    } catch {
+      case e: Throwable =>
+        // Handle case where it was added with sc.addFile
+        // When they are added via sc.addFile, they are always downloaded to local file system
+        logInfo(log"${MDC(XSD_PATH, xsdPath)} was not found, " +
+          log"falling back to look up files added by Spark")
+        val f = new File(SparkFiles.get(xsdPath.toString))
+        if (f.exists()) {
+          new FileInputStream(f)
+        } else {
+          throw e
+        }
+    }
+  }
 
   /**
    * Parses the XSD at the given local path and caches it.

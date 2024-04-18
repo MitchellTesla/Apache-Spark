@@ -15,7 +15,9 @@
 # limitations under the License.
 #
 
+import os
 import unittest
+
 from pyspark.sql import SparkSession
 from pyspark.testing.connectutils import should_test_connect, connect_requirement_message
 
@@ -35,7 +37,9 @@ if should_test_connect:
 )
 class EvaluationTestsOnConnect(EvaluationTestsMixin, unittest.TestCase):
     def setUp(self) -> None:
-        self.spark = SparkSession.builder.remote("local[2]").getOrCreate()
+        self.spark = SparkSession.builder.remote(
+            os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "local[2]")
+        ).getOrCreate()
 
     def tearDown(self) -> None:
         self.spark.stop()

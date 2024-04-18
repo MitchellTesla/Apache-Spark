@@ -69,7 +69,7 @@ The history server can be configured as follows:
 
 ### Environment Variables
 
-<table class="table table-striped">
+<table>
   <thead><tr><th style="width:21%">Environment Variable</th><th>Meaning</th></tr></thead>
   <tr>
     <td><code>SPARK_DAEMON_MEMORY</code></td>
@@ -145,7 +145,7 @@ Use it with caution.
 Security options for the Spark History Server are covered more detail in the
 [Security](security.html#web-ui) page.
 
-<table class="table table-striped">
+<table class="spark-config">
   <thead>
   <tr>
     <th>Property Name</th>
@@ -414,9 +414,9 @@ Security options for the Spark History Server are covered more detail in the
   </tr>
   <tr>
     <td>spark.history.store.hybridStore.diskBackend</td>
-    <td>LEVELDB</td>
+    <td>ROCKSDB</td>
     <td>
-      Specifies a disk-based store used in hybrid store; LEVELDB or ROCKSDB.
+      Specifies a disk-based store used in hybrid store; ROCKSDB or LEVELDB (deprecated).
     </td>
     <td>3.3.0</td>
   </tr>
@@ -470,7 +470,7 @@ only for applications in cluster mode, not applications in client mode. Applicat
 can be identified by their `[attempt-id]`. In the API listed below, when running in YARN cluster mode,
 `[app-id]` will actually be `[base-app-id]/[attempt-id]`, where `[base-app-id]` is the YARN application ID.
 
-<table class="table table-striped">
+<table>
   <thead><tr><th>Endpoint</th><th>Meaning</th></tr></thead>
   <tr>
     <td><code>/applications</code></td>
@@ -669,7 +669,7 @@ The REST API exposes the values of the Task Metrics collected by Spark executors
 of task execution. The metrics can be used for performance troubleshooting and workload characterization.
 A list of the available metrics, with a short description:
 
-<table class="table table-striped">
+<table>
   <thead>
     <tr>
       <th>Spark Executor Task Metric name</th>
@@ -704,6 +704,16 @@ A list of the available metrics, with a short description:
     <td>Elapsed time the JVM spent in garbage collection while executing this task.
     The value is expressed in milliseconds.</td>
   </tr>
+  <tr>
+    <td>ConcurrentGCCount</td>
+    <td>This metric returns the total number of collections that have occurred.
+        It only applies when the Java Garbage collector is G1 Concurrent GC.</td>
+  </tr>
+  <tr>
+    <td>ConcurrentGCTime</td>
+    <td>This metric returns the approximate accumulated collection elapsed time in milliseconds.
+        It only applies when the Java Garbage collector is G1 Concurrent GC.</td>
+  </tr> 
   <tr>
     <td>resultSerializationTime</td>
     <td>Elapsed time spent serializing the task result. The value is expressed in milliseconds.</td>
@@ -821,13 +831,12 @@ A list of the available metrics, with a short description:
 Executor-level metrics are sent from each executor to the driver as part of the Heartbeat to describe the performance metrics of Executor itself like JVM heap memory, GC information.
 Executor metric values and their measured memory peak values per executor are exposed via the REST API in JSON format and in Prometheus format.
 The JSON end point is exposed at: `/applications/[app-id]/executors`, and the Prometheus endpoint at: `/metrics/executors/prometheus`.
-The Prometheus endpoint is conditional to a configuration parameter: `spark.ui.prometheus.enabled=true` (the default is `false`).
 In addition, aggregated per-stage peak values of the executor memory metrics are written to the event log if
 `spark.eventLog.logStageExecutorMetrics` is true.
 Executor memory metrics are also exposed via the Spark metrics system based on the [Dropwizard metrics library](https://metrics.dropwizard.io/4.2.0).
 A list of the available metrics, with a short description:
 
-<table class="table table-striped">
+<table>
   <thead>
       <tr><th>Executor Level Metric name</th>
       <th>Short description</th>
@@ -1062,7 +1071,6 @@ set of sinks to which metrics are reported. The following instances are currentl
 * `driver`: The Spark driver process (the process in which your SparkContext is created).
 * `shuffleService`: The Spark shuffle service.
 * `applicationMaster`: The Spark ApplicationMaster when running on YARN.
-* `mesos_cluster`: The Spark cluster scheduler when running on Mesos.
 
 Each instance can report to zero or more _sinks_. Sinks are contained in the
 `org.apache.spark.metrics.sink` package:
@@ -1189,7 +1197,7 @@ This is the component with the largest amount of instrumented metrics
 
 - namespace=appStatus (all metrics of type=counter)
   - **note:** Introduced in Spark 3.0. Conditional to a configuration parameter:
-   `spark.metrics.appStatusSource.enabled` (default is false)
+   `spark.metrics.appStatusSource.enabled` (default is true)
   - stages.failedStages.count
   - stages.skippedStages.count
   - stages.completedStages.count
@@ -1293,6 +1301,17 @@ These metrics are exposed by Spark executors.
   - shuffleRemoteBytesReadToDisk.count
   - shuffleTotalBytesRead.count
   - shuffleWriteTime.count
+  - Metrics related to push-based shuffle:
+    - shuffleCorruptMergedBlockChunks
+    - shuffleMergedFetchFallbackCount
+    - shuffleMergedRemoteBlocksFetched
+    - shuffleMergedLocalBlocksFetched
+    - shuffleMergedRemoteChunksFetched
+    - shuffleMergedLocalChunksFetched
+    - shuffleMergedRemoteBytesRead
+    - shuffleMergedLocalBytesRead
+    - shuffleRemoteReqsDuration
+    - shuffleMergedRemoteReqsDuration
   - succeededTasks.count
   - threadpool.activeTasks
   - threadpool.completeTasks
@@ -1384,13 +1403,6 @@ Note: applies when running on YARN
 - numExecutorsRunning
 - numLocalityAwareTasks
 - numReleasedContainers
-
-### Component instance = mesos_cluster
-Note: applies when running on mesos
-
-- waitingDrivers
-- launchedDrivers
-- retryDrivers
 
 ### Component instance = master
 Note: applies when running in Spark standalone as master

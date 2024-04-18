@@ -17,7 +17,9 @@
 
 package org.apache.spark.sql.catalyst.plans.logical
 
+import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.analysis._
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.{AliasAwareQueryOutputOrdering, QueryPlan}
@@ -206,7 +208,8 @@ trait LeafNode extends LogicalPlan with LeafLike[LogicalPlan] {
   override def producedAttributes: AttributeSet = outputSet
 
   /** Leaf nodes that can survive analysis must define their own statistics. */
-  def computeStats(): Statistics = throw new UnsupportedOperationException
+  def computeStats(): Statistics =
+    throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3114")
 }
 
 /**
@@ -326,6 +329,54 @@ object LogicalPlanIntegrity {
   }
 
   /**
+   * This method validates there are no dangling attribute references.
+   * Returns an error message if the check does not pass, or None if it does pass.
+   */
+  def validateNoDanglingReferences(plan: LogicalPlan): Option[String] = {
+    plan.collectFirst {
+      // DML commands and multi instance relations (like InMemoryRelation caches)
+      // have different output semantics than typical queries.
+      case _: Command => None
+      case _: MultiInstanceRelation => None
+      case n if canGetOutputAttrs(n) =>
+        if (n.missingInput.nonEmpty) {
+          Some(s"Aliases ${ n.missingInput.mkString(", ")} are dangling " +
+            s"in the references for plan:\n ${n.treeString}")
+        } else {
+          None
+        }
+    }.flatten
+  }
+
+  /**
+   * Validate that the aggregation expressions in Aggregate plans are valid.
+   * Returns an error message if the check fails, or None if it succeeds.
+   */
+  def validateAggregateExpressions(plan: LogicalPlan): Option[String] = {
+    plan.collectFirst {
+      case a: Aggregate =>
+        try {
+          ExprUtils.assertValidAggregation(a)
+          None
+        } catch {
+          case e: AnalysisException =>
+            Some(s"Aggregate: ${a.toString} is not a valid aggregate expression: " +
+            s"${e.getSimpleMessage}")
+        }
+    }.flatten
+  }
+
+  def validateSchemaOutput(previousPlan: LogicalPlan, currentPlan: LogicalPlan): Option[String] = {
+    if (!DataTypeUtils.equalsIgnoreNullability(previousPlan.schema, currentPlan.schema)) {
+      Some(s"The plan output schema has changed from ${previousPlan.schema.sql} to " +
+        currentPlan.schema.sql + s". The previous plan: ${previousPlan.treeString}\nThe new " +
+        "plan:\n" + currentPlan.treeString)
+    } else {
+      None
+    }
+  }
+
+  /**
    * Validate the structural integrity of an optimized plan.
    * For example, we can check after the execution of each rule that each plan:
    * - is still resolved
@@ -337,22 +388,22 @@ object LogicalPlanIntegrity {
   def validateOptimizedPlan(
       previousPlan: LogicalPlan,
       currentPlan: LogicalPlan): Option[String] = {
-    if (!currentPlan.resolved) {
+    var validation = if (!currentPlan.resolved) {
       Some("The plan becomes unresolved: " + currentPlan.treeString + "\nThe previous plan: " +
         previousPlan.treeString)
     } else if (currentPlan.exists(PlanHelper.specialExpressionsInUnsupportedOperator(_).nonEmpty)) {
       Some("Special expressions are placed in the wrong plan: " + currentPlan.treeString)
     } else {
-      LogicalPlanIntegrity.validateExprIdUniqueness(currentPlan).orElse {
-        if (!DataTypeUtils.equalsIgnoreNullability(previousPlan.schema, currentPlan.schema)) {
-          Some(s"The plan output schema has changed from ${previousPlan.schema.sql} to " +
-            currentPlan.schema.sql + s". The previous plan: ${previousPlan.treeString}\nThe new " +
-            "plan:\n" + currentPlan.treeString)
-        } else {
-          None
-        }
-      }
+      None
     }
+    validation = validation
+      .orElse(LogicalPlanIntegrity.validateExprIdUniqueness(currentPlan))
+      .orElse(LogicalPlanIntegrity.validateSchemaOutput(previousPlan, currentPlan))
+      .orElse(LogicalPlanIntegrity.validateNoDanglingReferences(currentPlan))
+      .orElse(LogicalPlanIntegrity.validateAggregateExpressions(currentPlan))
+      .map(err => s"${err}\nPrevious schema:${previousPlan.output.mkString(", ")}" +
+        s"\nPrevious plan: ${previousPlan.treeString}")
+    validation
   }
 }
 

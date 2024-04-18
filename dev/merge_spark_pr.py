@@ -72,6 +72,14 @@ JIRA_API_BASE = "https://issues.apache.org/jira"
 BRANCH_PREFIX = "PR_TOOL"
 
 
+def print_error(msg):
+    print("\033[91m%s\033[0m" % msg)
+
+
+def bold_input(prompt) -> str:
+    return input("\033[1m%s\033[0m" % prompt)
+
+
 def get_json(url):
     try:
         request = Request(url)
@@ -80,18 +88,24 @@ def get_json(url):
         return json.load(urlopen(request))
     except HTTPError as e:
         if "X-RateLimit-Remaining" in e.headers and e.headers["X-RateLimit-Remaining"] == "0":
-            print(
+            print_error(
                 "Exceeded the GitHub API rate limit; see the instructions in "
                 + "dev/merge_spark_pr.py to configure an OAuth token for making authenticated "
                 + "GitHub requests."
             )
+        elif e.code == 401:
+            print_error(
+                "GITHUB_OAUTH_KEY is invalid or expired. Please regenerate a new one with "
+                + "at least the 'public_repo' scope on https://github.com/settings/tokens and "
+                + "update your local settings before you try again."
+            )
         else:
-            print("Unable to fetch URL, exiting: %s" % url)
+            print_error("Unable to fetch URL, exiting: %s" % url)
         sys.exit(-1)
 
 
 def fail(msg):
-    print(msg)
+    print_error(msg)
     clean_up()
     sys.exit(-1)
 
@@ -105,7 +119,7 @@ def run_cmd(cmd):
 
 
 def continue_maybe(prompt):
-    result = input("\n%s (y/n): " % prompt)
+    result = bold_input("%s (y/N): " % prompt)
     if result.lower() != "y":
         fail("Okay, exiting")
 
@@ -147,7 +161,7 @@ def merge_pr(pr_num, target_ref, title, body, pr_repo_desc):
     distinct_authors = sorted(
         list(dict.fromkeys(commit_authors)), key=lambda x: commit_authors.count(x), reverse=True
     )
-    primary_author = input(
+    primary_author = bold_input(
         'Enter primary author in the format of "name <email>" [%s]: ' % distinct_authors[0]
     )
     if primary_author == "":
@@ -197,7 +211,7 @@ def merge_pr(pr_num, target_ref, title, body, pr_repo_desc):
         run_cmd("git push %s %s:%s" % (PUSH_REMOTE_NAME, target_branch_name, target_ref))
     except Exception as e:
         clean_up()
-        fail("Exception while pushing: %s" % e)
+        print_error("Exception while pushing: %s" % e)
 
     merge_hash = run_cmd("git rev-parse %s" % target_branch_name)[:8]
     clean_up()
@@ -207,7 +221,7 @@ def merge_pr(pr_num, target_ref, title, body, pr_repo_desc):
 
 
 def cherry_pick(pr_num, merge_hash, default_branch):
-    pick_ref = input("Enter a branch name [%s]: " % default_branch)
+    pick_ref = bold_input("Enter a branch name [%s]: " % default_branch)
     if pick_ref == "":
         pick_ref = default_branch
 
@@ -242,34 +256,49 @@ def cherry_pick(pr_num, merge_hash, default_branch):
     return pick_ref
 
 
-def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
-    jira_id = input("Enter a JIRA id [%s]: " % default_jira_id)
-    if jira_id == "":
-        jira_id = default_jira_id
-
-    try:
-        issue = asf_jira.issue(jira_id)
-    except Exception as e:
-        fail("ASF JIRA could not find %s\n%s" % (jira_id, e))
-
-    cur_status = issue.fields.status.name
-    cur_summary = issue.fields.summary
-    cur_assignee = issue.fields.assignee
-    if cur_assignee is None:
-        cur_assignee = choose_jira_assignee(issue)
-    # Check again, we might not have chosen an assignee
-    if cur_assignee is None:
-        cur_assignee = "NOT ASSIGNED!!!"
-    else:
-        cur_assignee = cur_assignee.displayName
-
-    if cur_status == "Resolved" or cur_status == "Closed":
-        fail("JIRA issue %s already has status '%s'" % (jira_id, cur_status))
-    print("=== JIRA %s ===" % jira_id)
+def print_jira_issue_summary(issue):
+    summary = issue.fields.summary
+    assignee = issue.fields.assignee
+    if assignee is not None:
+        assignee = assignee.displayName
+    status = issue.fields.status.name
+    print("=== JIRA %s ===" % issue.key)
     print(
         "summary\t\t%s\nassignee\t%s\nstatus\t\t%s\nurl\t\t%s/%s\n"
-        % (cur_summary, cur_assignee, cur_status, JIRA_BASE, jira_id)
+        % (summary, assignee, status, JIRA_BASE, issue.key)
     )
+
+
+def get_jira_issue(prompt, default_jira_id=""):
+    jira_id = bold_input("%s [%s]: " % (prompt, default_jira_id))
+    if jira_id == "":
+        jira_id = default_jira_id
+        if jira_id == "":
+            print("JIRA ID not found, skipping.")
+            return None
+    try:
+        issue = asf_jira.issue(jira_id)
+        print_jira_issue_summary(issue)
+        status = issue.fields.status.name
+        if status == "Resolved" or status == "Closed":
+            print("JIRA issue %s already has status '%s'" % (jira_id, status))
+            return None
+        if bold_input("Check if the JIRA information is as expected (y/N): ").lower() == "y":
+            return issue
+        else:
+            return get_jira_issue("Enter the revised JIRA ID again or leave blank to skip")
+    except Exception as e:
+        print_error("ASF JIRA could not find %s: %s" % (jira_id, e))
+        return get_jira_issue("Enter the revised JIRA ID again or leave blank to skip")
+
+
+def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
+    issue = get_jira_issue("Enter a JIRA id", default_jira_id)
+    if issue is None:
+        return
+
+    if issue.fields.assignee is None:
+        choose_jira_assignee(issue)
 
     versions = asf_jira.project_versions("SPARK")
     # Consider only x.y.z, unreleased, unarchived versions
@@ -298,7 +327,7 @@ def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
                 # we've found two candidates for branch-3.5, we pick the last/smallest one
                 default_fix_versions.append(found_versions[-1])
             else:
-                print(
+                print_error(
                     "Target version for %s is not found on JIRA, it may be archived or "
                     "not created. Skipping it." % b
                 )
@@ -318,7 +347,7 @@ def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
     available_versions = set(list(map(lambda v: v.name, versions)))
     while True:
         try:
-            fix_versions = input(
+            fix_versions = bold_input(
                 "Enter comma-separated fix version(s) [%s]: " % default_fix_versions
             )
             if fix_versions == "":
@@ -342,17 +371,23 @@ def resolve_jira_issue(merge_branches, comment, default_jira_id=""):
 
     jira_fix_versions = list(map(lambda v: get_version_json(v), fix_versions))
 
-    resolve = list(filter(lambda a: a["name"] == "Resolve Issue", asf_jira.transitions(jira_id)))[0]
+    resolve = list(filter(lambda a: a["name"] == "Resolve Issue", asf_jira.transitions(issue.key)))[
+        0
+    ]
     resolution = list(filter(lambda r: r.raw["name"] == "Fixed", asf_jira.resolutions()))[0]
     asf_jira.transition_issue(
-        jira_id,
+        issue.key,
         resolve["id"],
         fixVersions=jira_fix_versions,
         comment=comment,
         resolution={"id": resolution.raw["id"]},
     )
 
-    print("Successfully resolved %s with fixVersions=%s!" % (jira_id, fix_versions))
+    try:
+        print_jira_issue_summary(asf_jira.issue(issue.key))
+    except Exception:
+        print("Unable to fetch JIRA issue %s after resolving" % issue.key)
+    print("Successfully resolved %s with fixVersions=%s!" % (issue.key, fix_versions))
 
 
 def choose_jira_assignee(issue):
@@ -375,7 +410,7 @@ def choose_jira_assignee(issue):
                 if author in commentators:
                     annotations.append("Commentator")
                 print("[%d] %s (%s)" % (idx, author.displayName, ",".join(annotations)))
-            raw_assignee = input(
+            raw_assignee = bold_input(
                 "Enter number of user, or userid, to assign to (blank to leave unassigned):"
             )
             if raw_assignee == "":
@@ -519,7 +554,7 @@ def initialize_jira():
     jira_server = {"server": JIRA_API_BASE}
 
     if not JIRA_IMPORTED:
-        print("ERROR finding jira library. Run 'pip3 install jira' to install.")
+        print_error("ERROR finding jira library. Run 'pip3 install jira' to install.")
         continue_maybe("Continue without jira?")
     elif JIRA_ACCESS_TOKEN:
         client = jira.client.JIRA(jira_server, token_auth=JIRA_ACCESS_TOKEN)
@@ -560,7 +595,7 @@ def main():
     branch_names = sorted(branch_names, reverse=True)
     branch_iter = iter(branch_names)
 
-    pr_num = input("Which pull request would you like to merge? (e.g. 34): ")
+    pr_num = bold_input("Which pull request would you like to merge? (e.g. 34): ")
     pr = get_json("%s/pulls/%s" % (GITHUB_API_BASE, pr_num))
     pr_events = get_json("%s/issues/%s/events" % (GITHUB_API_BASE, pr_num))
 
@@ -577,7 +612,7 @@ def main():
         print("I've re-written the title as follows to match the standard format:")
         print("Original: %s" % pr["title"])
         print("Modified: %s" % modified_title)
-        result = input("Would you like to use the modified title? (y/n): ")
+        result = bold_input("Would you like to use the modified title? (y/N): ")
         if result.lower() == "y":
             title = modified_title
             print("Using modified title:")
@@ -597,7 +632,7 @@ def main():
         print(modified_body)
         print("=" * 80)
         print("I've removed the comments from PR template like the above:")
-        result = input("Would you like to use the modified body? (y/n): ")
+        result = bold_input("Would you like to use the modified body? (y/N): ")
         if result.lower() == "y":
             body = modified_body
             print("Using modified body:")
@@ -615,8 +650,13 @@ def main():
     # Instead, they're closed by committers.
     merge_commits = [e for e in pr_events if e["event"] == "closed" and e["commit_id"] is not None]
 
-    if merge_commits:
-        merge_hash = merge_commits[0]["commit_id"]
+    if merge_commits and pr["state"] == "closed":
+        # A PR might have multiple merge commits, if it's reopened and merged again. We shall
+        # cherry-pick PRs in closed state with the latest merge hash.
+        # If the PR is still open(reopened), we shall not cherry-pick it but perform the normal
+        # merge as it could have been reverted earlier.
+        merge_commits = sorted(merge_commits, key=lambda x: x["created_at"])
+        merge_hash = merge_commits[-1]["commit_id"]
         message = get_json("%s/commits/%s" % (GITHUB_API_BASE, merge_hash))["commit"]["message"]
 
         print("Pull request %s has already been merged, assuming you want to backport" % pr_num)
@@ -647,7 +687,7 @@ def main():
     merge_hash = merge_pr(pr_num, target_ref, title, body, pr_repo_desc)
 
     pick_prompt = "Would you like to pick %s into another branch?" % merge_hash
-    while input("\n%s (y/n): " % pick_prompt).lower() == "y":
+    while bold_input("\n%s (y/N): " % pick_prompt).lower() == "y":
         merged_refs = merged_refs + [
             cherry_pick(pr_num, merge_hash, next(branch_iter, branch_names[0]))
         ]

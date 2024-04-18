@@ -29,30 +29,16 @@ import org.apache.spark.sql.types.{BooleanType, ByteType, ShortType, StructType}
 import org.apache.spark.tags.DockerTest
 
 /**
- * To run this test suite for a specific version (e.g., ibmcom/db2:11.5.6.0a):
+ * To run this test suite for a specific version (e.g., ibmcom/db2:11.5.8.0):
  * {{{
- *   ENABLE_DOCKER_INTEGRATION_TESTS=1 DB2_DOCKER_IMAGE_NAME=ibmcom/db2:11.5.6.0a
+ *   ENABLE_DOCKER_INTEGRATION_TESTS=1 DB2_DOCKER_IMAGE_NAME=ibmcom/db2:11.5.8.0
  *     ./build/sbt -Pdocker-integration-tests
- *     "testOnly org.apache.spark.sql.jdbc.DB2IntegrationSuite"
+ *     "docker-integration-tests/testOnly org.apache.spark.sql.jdbc.DB2IntegrationSuite"
  * }}}
  */
 @DockerTest
 class DB2IntegrationSuite extends DockerJDBCIntegrationSuite {
-  override val db = new DatabaseOnDocker {
-    override val imageName = sys.env.getOrElse("DB2_DOCKER_IMAGE_NAME", "ibmcom/db2:11.5.6.0a")
-    override val env = Map(
-      "DB2INST1_PASSWORD" -> "rootpass",
-      "LICENSE" -> "accept",
-      "DBNAME" -> "foo",
-      "ARCHIVE_LOGS" -> "false",
-      "AUTOCONFIG" -> "false"
-    )
-    override val usesIpc = false
-    override val jdbcPort: Int = 50000
-    override val privileged = true
-    override def getJdbcUrl(ip: String, port: Int): String =
-      s"jdbc:db2://$ip:$port/foo:user=db2inst1;password=rootpass;retrieveMessagesFromServerOnGetMessage=true;" //scalastyle:ignore
-  }
+  override val db = new DB2DatabaseOnDocker
 
   override val connectionTimeout = timeout(3.minutes)
 
@@ -187,7 +173,7 @@ class DB2IntegrationSuite extends DockerJDBCIntegrationSuite {
       .option("url", jdbcUrl)
       .option("query", query)
       .load()
-    assert(df.collect.toSet === expectedResult)
+    assert(df.collect().toSet === expectedResult)
 
     // query option in the create table path.
     sql(
@@ -196,7 +182,7 @@ class DB2IntegrationSuite extends DockerJDBCIntegrationSuite {
          |USING org.apache.spark.sql.jdbc
          |OPTIONS (url '$jdbcUrl', query '$query')
        """.stripMargin.replaceAll("\n", " "))
-    assert(sql("select x, y from queryOption").collect.toSet == expectedResult)
+    assert(sql("select x, y from queryOption").collect().toSet == expectedResult)
   }
 
   test("SPARK-30062") {
@@ -210,10 +196,10 @@ class DB2IntegrationSuite extends DockerJDBCIntegrationSuite {
     for (_ <- 0 to 2) {
       df.write.mode(SaveMode.Append).jdbc(jdbcUrl, "tblcopy", new Properties)
     }
-    assert(sqlContext.read.jdbc(jdbcUrl, "tblcopy", new Properties).count === 6)
+    assert(sqlContext.read.jdbc(jdbcUrl, "tblcopy", new Properties).count() === 6)
     df.write.mode(SaveMode.Overwrite).option("truncate", true)
       .jdbc(jdbcUrl, "tblcopy", new Properties)
-    val actual = sqlContext.read.jdbc(jdbcUrl, "tblcopy", new Properties).collect
+    val actual = sqlContext.read.jdbc(jdbcUrl, "tblcopy", new Properties).collect()
     assert(actual.length === 2)
     assert(actual.toSet === expectedResult)
   }

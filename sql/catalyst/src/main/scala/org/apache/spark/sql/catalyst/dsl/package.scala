@@ -31,6 +31,7 @@ import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.plans.{Inner, JoinType}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
+import org.apache.spark.sql.catalyst.util.CollationFactory
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -152,9 +153,6 @@ package object dsl {
     def desc: SortOrder = SortOrder(expr, Descending)
     def desc_nullsFirst: SortOrder = SortOrder(expr, Descending, NullsFirst, Seq.empty)
     def as(alias: String): NamedExpression = Alias(expr, alias)()
-    // TODO: Remove at Spark 4.0.0
-    @deprecated("Use as(alias: String)", "3.4.0")
-    def as(alias: Symbol): NamedExpression = Alias(expr, alias.name)()
   }
 
   trait ExpressionConversions {
@@ -304,8 +302,12 @@ package object dsl {
       /** Creates a new AttributeReference of type double */
       def double: AttributeReference = attrRef(DoubleType)
 
-      /** Creates a new AttributeReference of type string */
+      /** Creates a new AttributeReference of type string with default collation */
       def string: AttributeReference = attrRef(StringType)
+
+      /** Creates a new AttributeReference of type string with specified collation */
+      def string(collation: String): AttributeReference =
+        attrRef(StringType(CollationFactory.collationNameToId(collation)))
 
       /** Creates a new AttributeReference of type date */
       def date: AttributeReference = attrRef(DateType)
@@ -398,6 +400,8 @@ package object dsl {
 
       def limit(limitExpr: Expression): LogicalPlan = Limit(limitExpr, logicalPlan)
 
+      def localLimit(limitExpr: Expression): LogicalPlan = LocalLimit(limitExpr, logicalPlan)
+
       def offset(offsetExpr: Expression): LogicalPlan = Offset(offsetExpr, logicalPlan)
 
       def join(
@@ -415,7 +419,7 @@ package object dsl {
 
       def cogroup[Key: Encoder, Left: Encoder, Right: Encoder, Result: Encoder](
           otherPlan: LogicalPlan,
-          func: (Key, Iterator[Left], Iterator[Right]) => TraversableOnce[Result],
+          func: (Key, Iterator[Left], Iterator[Right]) => IterableOnce[Result],
           leftGroup: Seq[Attribute],
           rightGroup: Seq[Attribute],
           leftAttr: Seq[Attribute],
@@ -468,9 +472,6 @@ package object dsl {
           limit: Int): LogicalPlan =
         WindowGroupLimit(partitionSpec, orderSpec, rankLikeFunction, limit, logicalPlan)
 
-      // TODO: Remove at Spark 4.0.0
-      @deprecated("Use subquery(alias: String)", "3.4.0")
-      def subquery(alias: Symbol): LogicalPlan = SubqueryAlias(alias.name, logicalPlan)
       def subquery(alias: String): LogicalPlan = SubqueryAlias(alias, logicalPlan)
       def as(alias: String): LogicalPlan = SubqueryAlias(alias, logicalPlan)
 

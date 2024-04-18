@@ -26,7 +26,8 @@ import com.codahale.metrics.{Metric, MetricRegistry}
 import org.eclipse.jetty.servlet.ServletContextHandler
 
 import org.apache.spark.{SecurityManager, SparkConf}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.CLASS_NAME
 import org.apache.spark.internal.config._
 import org.apache.spark.metrics.sink.{MetricsServlet, PrometheusServlet, Sink}
 import org.apache.spark.metrics.source.{Source, StaticSources}
@@ -101,12 +102,12 @@ private[spark] class MetricsSystem private (
       registerSources()
     }
     registerSinks()
-    sinks.foreach(_.start)
+    sinks.foreach(_.start())
   }
 
   def stop(): Unit = {
     if (running) {
-      sinks.foreach(_.stop)
+      sinks.foreach(_.stop())
       registry.removeMatching((_: String, _: Metric) => true)
     } else {
       logWarning("Stopping a MetricsSystem that is not running")
@@ -187,7 +188,8 @@ private[spark] class MetricsSystem private (
         val source = Utils.classForName[Source](classPath).getConstructor().newInstance()
         registerSource(source)
       } catch {
-        case e: Exception => logError("Source class " + classPath + " cannot be instantiated", e)
+        case e: Exception =>
+          logError(log"Source class ${MDC(CLASS_NAME, classPath)} cannot be instantiated", e)
       }
     }
   }
@@ -227,7 +229,7 @@ private[spark] class MetricsSystem private (
           }
         } catch {
           case e: Exception =>
-            logError("Sink class " + classPath + " cannot be instantiated")
+            logError(log"Sink class ${MDC(CLASS_NAME, classPath)} cannot be instantiated")
             throw e
         }
       }
@@ -278,7 +280,4 @@ private[spark] object MetricsSystemInstances {
 
   // The Spark ApplicationMaster when running on YARN
   val APPLICATION_MASTER = "applicationMaster"
-
-  // The Spark cluster scheduler when running on Mesos
-  val MESOS_CLUSTER = "mesos_cluster"
 }

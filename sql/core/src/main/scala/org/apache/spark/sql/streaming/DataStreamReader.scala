@@ -19,7 +19,7 @@ package org.apache.spark.sql.streaming
 
 import java.util.Locale
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.spark.annotation.Evolving
 import org.apache.spark.internal.Logging
@@ -35,6 +35,8 @@ import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.DataSource
 import org.apache.spark.sql.execution.datasources.json.JsonUtils.checkJsonSchema
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Utils, FileDataSourceV2}
+import org.apache.spark.sql.execution.datasources.v2.python.PythonDataSourceV2
+import org.apache.spark.sql.execution.datasources.xml.XmlUtils.checkXmlSchema
 import org.apache.spark.sql.execution.streaming.StreamingRelation
 import org.apache.spark.sql.sources.StreamSourceProvider
 import org.apache.spark.sql.types.StructType
@@ -155,7 +157,7 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
       extraOptions + ("path" -> path.get)
     }
 
-    val ds = DataSource.lookupDataSource(source, sparkSession.sqlContext.conf).
+    val ds = DataSource.lookupDataSource(source, sparkSession.sessionState.conf).
       getConstructor().newInstance()
     // We need to generate the V1 data source so we can pass it to the V2 relation as a shim.
     // We can't be sure at this point whether we'll actually want to use V2, since we don't know the
@@ -174,9 +176,13 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
       case provider: TableProvider if !provider.isInstanceOf[FileDataSourceV2] =>
         val sessionOptions = DataSourceV2Utils.extractSessionConfigs(
           source = provider, conf = sparkSession.sessionState.conf)
-        val finalOptions = sessionOptions.filterKeys(!optionsWithPath.contains(_)).toMap ++
+        val finalOptions = sessionOptions.filter { case (k, _) => !optionsWithPath.contains(k) } ++
             optionsWithPath.originalMap
         val dsOptions = new CaseInsensitiveStringMap(finalOptions.asJava)
+        provider match {
+          case p: PythonDataSourceV2 => p.setShortName(source)
+          case _ =>
+        }
         val table = DataSourceV2Utils.getTableFromProvider(provider, dsOptions, userSpecifiedSchema)
         import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Implicits._
         table match {
@@ -225,6 +231,8 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    * <ul>
    * <li>`maxFilesPerTrigger` (default: no max limit): sets the maximum number of new files to be
    * considered in every trigger.</li>
+   * <li>`maxBytesPerTrigger` (default: no max limit): sets the maximum total size of new files
+   * to be considered in every trigger.</li>
    * </ul>
    *
    * You can find the JSON-specific options for reading JSON file stream in
@@ -249,6 +257,8 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    * <ul>
    * <li>`maxFilesPerTrigger` (default: no max limit): sets the maximum number of new files to be
    * considered in every trigger.</li>
+   * <li>`maxBytesPerTrigger` (default: no max limit): sets the maximum total size of new files
+   * to be considered in every trigger.</li>
    * </ul>
    *
    * You can find the CSV-specific options for reading CSV file stream in
@@ -270,6 +280,8 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    * <ul>
    * <li>`maxFilesPerTrigger` (default: no max limit): sets the maximum number of new files to be
    * considered in every trigger.</li>
+   * <li>`maxBytesPerTrigger` (default: no max limit): sets the maximum total size of new files
+   * to be considered in every trigger.</li>
    * </ul>
    *
    * You can find the XML-specific options for reading XML file stream in
@@ -278,7 +290,10 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    *
    * @since 4.0.0
    */
-  def xml(path: String): DataFrame = format("xml").load(path)
+  def xml(path: String): DataFrame = {
+    userSpecifiedSchema.foreach(checkXmlSchema)
+    format("xml").load(path)
+  }
 
   /**
    * Loads a ORC file stream, returning the result as a `DataFrame`.
@@ -287,6 +302,8 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    * <ul>
    * <li>`maxFilesPerTrigger` (default: no max limit): sets the maximum number of new files to be
    * considered in every trigger.</li>
+   * <li>`maxBytesPerTrigger` (default: no max limit): sets the maximum total size of new files
+   * to be considered in every trigger.</li>
    * </ul>
    *
    * ORC-specific option(s) for reading ORC file stream can be found in
@@ -307,6 +324,8 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    * <ul>
    * <li>`maxFilesPerTrigger` (default: no max limit): sets the maximum number of new files to be
    * considered in every trigger.</li>
+   * <li>`maxBytesPerTrigger` (default: no max limit): sets the maximum total size of new files
+   * to be considered in every trigger.</li>
    * </ul>
    *
    * Parquet-specific option(s) for reading Parquet file stream can be found in
@@ -355,6 +374,8 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    * <ul>
    * <li>`maxFilesPerTrigger` (default: no max limit): sets the maximum number of new files to be
    * considered in every trigger.</li>
+   * <li>`maxBytesPerTrigger` (default: no max limit): sets the maximum total size of new files
+   * to be considered in every trigger.</li>
    * </ul>
    *
    * You can find the text-specific options for reading text files in

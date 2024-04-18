@@ -24,7 +24,7 @@ import org.apache.spark.sql.connector.catalog.Identifier
 import org.apache.spark.sql.types._
 
 
-private case object TeradataDialect extends JdbcDialect {
+private case class TeradataDialect() extends JdbcDialect {
 
   override def canHandle(url: String): Boolean =
     url.toLowerCase(Locale.ROOT).startsWith("jdbc:teradata")
@@ -59,7 +59,7 @@ private case object TeradataDialect extends JdbcDialect {
    */
   override def getTruncateQuery(
       table: String,
-      cascade: Option[Boolean] = isCascadingTruncateTable): String = {
+      cascade: Option[Boolean] = isCascadingTruncateTable()): String = {
     s"DELETE FROM $table ALL"
   }
 

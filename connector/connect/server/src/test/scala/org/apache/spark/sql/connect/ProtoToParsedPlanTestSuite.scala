@@ -26,17 +26,21 @@ import scala.util.{Failure, Success, Try}
 
 import org.apache.spark.{SparkConf, SparkFunSuite}
 import org.apache.spark.connect.proto
+import org.apache.spark.internal.LogKey.PATH
+import org.apache.spark.internal.MDC
 import org.apache.spark.sql.catalyst.{catalog, QueryPlanningTracker}
 import org.apache.spark.sql.catalyst.analysis.{caseSensitiveResolution, Analyzer, FunctionRegistry, Resolver, TableFunctionRegistry}
 import org.apache.spark.sql.catalyst.catalog.SessionCatalog
-import org.apache.spark.sql.catalyst.optimizer.ReplaceExpressions
+import org.apache.spark.sql.catalyst.optimizer.{ReplaceExpressions, RewriteWithExpression}
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.rules.RuleExecutor
 import org.apache.spark.sql.connect.config.Connect
 import org.apache.spark.sql.connect.planner.SparkConnectPlanner
 import org.apache.spark.sql.connect.service.SessionHolder
-import org.apache.spark.sql.connector.catalog.{CatalogManager, Identifier, InMemoryCatalog}
+import org.apache.spark.sql.connector.catalog.{CatalogManager, Column, Identifier, InMemoryCatalog}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.test.SharedSparkSession
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.LongType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.util.Utils
 
@@ -122,6 +126,7 @@ class ProtoToParsedPlanTestSuite
         Connect.CONNECT_EXTENSIONS_EXPRESSION_CLASSES.key,
         "org.apache.spark.sql.connect.plugin.ExampleExpressionPlugin")
       .set(org.apache.spark.sql.internal.SQLConf.ANSI_ENABLED.key, false.toString)
+      .set(org.apache.spark.sql.internal.SQLConf.USE_COMMON_EXPR_ID_FOR_ALIAS.key, false.toString)
   }
 
   protected val suiteBaseResourcePath = commonResourcePath.resolve("query-tests")
@@ -135,12 +140,12 @@ class ProtoToParsedPlanTestSuite
     inMemoryCatalog.createNamespace(Array("tempdb"), emptyProps)
     inMemoryCatalog.createTable(
       Identifier.of(Array("tempdb"), "myTable"),
-      new StructType().add("id", "long"),
+      Array(Column.create("id", LongType)),
       Array.empty[Transform],
       emptyProps)
     inMemoryCatalog.createTable(
       Identifier.of(Array("tempdb"), "myStreamingTable"),
-      new StructType().add("id", "long"),
+      Array(Column.create("id", LongType)),
       Array.empty[Transform],
       emptyProps)
 
@@ -172,7 +177,7 @@ class ProtoToParsedPlanTestSuite
     val relativePath = inputFilePath.relativize(file)
     val fileName = relativePath.getFileName.toString
     if (!fileName.endsWith(".proto.bin")) {
-      logError(s"Skipping $fileName")
+      logError(log"Skipping ${MDC(PATH, fileName)}")
       return
     }
     val name = fileName.stripSuffix(".proto.bin")
@@ -181,8 +186,15 @@ class ProtoToParsedPlanTestSuite
       val planner = new SparkConnectPlanner(SessionHolder.forTesting(spark))
       val catalystPlan =
         analyzer.executeAndCheck(planner.transformRelation(relation), new QueryPlanningTracker)
-      val actual =
-        removeMemoryAddress(normalizeExprIds(ReplaceExpressions(catalystPlan)).treeString)
+      val finalAnalyzedPlan = {
+        object Helper extends RuleExecutor[LogicalPlan] {
+          val batches =
+            Batch("Finish Analysis", Once, ReplaceExpressions) ::
+              Batch("Rewrite With expression", Once, RewriteWithExpression) :: Nil
+        }
+        Helper.execute(catalystPlan)
+      }
+      val actual = removeMemoryAddress(normalizeExprIds(finalAnalyzedPlan).treeString)
       val goldenFile = goldenFilePath.resolve(relativePath).getParent.resolve(name + ".explain")
       Try(readGoldenFile(goldenFile)) match {
         case Success(expected) if expected == actual => // Test passes.

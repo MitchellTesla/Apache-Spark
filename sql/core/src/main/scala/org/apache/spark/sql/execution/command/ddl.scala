@@ -28,7 +28,8 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs._
 import org.apache.hadoop.mapred.{FileInputFormat, JobConf}
 
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.{ACTUAL_PARTITION_COLUMN, EXPECTED_PARTITION_COLUMN, PATH}
 import org.apache.spark.internal.config.RDD_PARALLEL_LISTING_THRESHOLD
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
@@ -51,6 +52,7 @@ import org.apache.spark.sql.internal.{HiveSerDe, SQLConf}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.PartitioningUtils
 import org.apache.spark.util.{SerializableConfiguration, ThreadUtils}
+import org.apache.spark.util.ArrayImplicits._
 
 // Note: The definition of these commands are based on the ones described in
 // https://cwiki.apache.org/confluence/display/Hive/LanguageManual+DDL
@@ -267,7 +269,7 @@ case class DropTableCommand(
 case class DropTempViewCommand(ident: Identifier) extends LeafRunnableCommand {
   override def run(sparkSession: SparkSession): Seq[Row] = {
     assert(ident.namespace().isEmpty || ident.namespace().length == 1)
-    val nameParts = ident.namespace() :+ ident.name()
+    val nameParts = (ident.namespace() :+ ident.name()).toImmutableArraySeq
     val catalog = sparkSession.sessionState.catalog
     catalog.getRawLocalOrGlobalTempView(nameParts).foreach { view =>
       val hasViewText = view.tableMeta.viewText.isDefined
@@ -373,23 +375,30 @@ case class AlterTableChangeColumnCommand(
   // TODO: support change column name/dataType/metadata/position.
   override def run(sparkSession: SparkSession): Seq[Row] = {
     val catalog = sparkSession.sessionState.catalog
+    // This command may change column default values, so we need to refresh the table relation cache
+    // here so that DML commands can resolve these default values correctly.
+    catalog.refreshTable(tableName)
     val table = catalog.getTableRawMetadata(tableName)
     val resolver = sparkSession.sessionState.conf.resolver
     DDLUtils.verifyAlterTableType(catalog, table, isView = false)
 
+    // Check that the column is not a partition column
+    if (table.partitionSchema.fieldNames.exists(resolver(columnName, _))) {
+        throw QueryCompilationErrors.cannotAlterPartitionColumn(table.qualifiedName, columnName)
+    }
     // Find the origin column from dataSchema by column name.
     val originColumn = findColumnByName(table.dataSchema, columnName, resolver)
     // Throw an AnalysisException if the column name/dataType is changed.
     if (!columnEqual(originColumn, newColumn, resolver)) {
       throw QueryCompilationErrors.alterTableChangeColumnNotSupportedForColumnTypeError(
-        toSQLId(table.identifier.nameParts), originColumn, newColumn)
+        toSQLId(table.identifier.nameParts), originColumn, newColumn, this.origin)
     }
 
     val newDataSchema = table.dataSchema.fields.map { field =>
       if (field.name == originColumn.name) {
         // Create a new column from the origin column with the new comment.
         val withNewComment: StructField =
-          addComment(field, newColumn.getComment)
+          addComment(field, newColumn.getComment())
         // Create a new column from the origin column with the new current default value.
         if (newColumn.getCurrentDefaultValue().isDefined) {
           if (newColumn.getCurrentDefaultValue().get.nonEmpty) {
@@ -703,14 +712,14 @@ case class RepairTableCommand(
       val partitionSpecsAndLocs: Seq[(TablePartitionSpec, Path)] =
         try {
           scanPartitions(spark, fs, pathFilter, root, Map(), table.partitionColumnNames, threshold,
-            spark.sessionState.conf.resolver, new ForkJoinTaskSupport(evalPool)).seq
+            spark.sessionState.conf.resolver, new ForkJoinTaskSupport(evalPool))
         } finally {
           evalPool.shutdown()
         }
       val total = partitionSpecsAndLocs.length
       logInfo(s"Found $total partitions in $root")
 
-      val partitionStats = if (spark.sqlContext.conf.gatherFastStats) {
+      val partitionStats = if (spark.sessionState.conf.gatherFastStats) {
         gatherPartitionStats(spark, partitionSpecsAndLocs, fs, pathFilter, threshold)
       } else {
         Map.empty[Path, PartitionStatistics]
@@ -755,11 +764,13 @@ case class RepairTableCommand(
     val statusPar: Seq[FileStatus] =
       if (partitionNames.length > 1 && statuses.length > threshold || partitionNames.length > 2) {
         // parallelize the list of partitions here, then we can have better parallelism later.
+        // scalastyle:off parvector
         val parArray = new ParVector(statuses.toVector)
         parArray.tasksupport = evalTaskSupport
+        // scalastyle:on parvector
         parArray.seq
       } else {
-        statuses
+        statuses.toImmutableArraySeq
       }
     statusPar.flatMap { st =>
       val name = st.getPath.getName
@@ -773,11 +784,12 @@ case class RepairTableCommand(
             partitionNames.drop(1), threshold, resolver, evalTaskSupport)
         } else {
           logWarning(
-            s"expected partition column ${partitionNames.head}, but got ${ps(0)}, ignoring it")
+            log"expected partition column ${MDC(EXPECTED_PARTITION_COLUMN, partitionNames.head)}," +
+              log" but got ${MDC(ACTUAL_PARTITION_COLUMN, ps(0))}, ignoring it")
           Seq.empty
         }
       } else {
-        logWarning(s"ignore ${new Path(path, name)}")
+        logWarning(log"ignore ${MDC(PATH, new Path(path, name))}")
         Seq.empty
       }
     }
@@ -950,7 +962,7 @@ object DDLUtils extends Logging {
   def verifyPartitionProviderIsHive(
       spark: SparkSession, table: CatalogTable, action: String): Unit = {
     val tableName = table.identifier.table
-    if (!spark.sqlContext.conf.manageFilesourcePartitions && isDatasourceTable(table)) {
+    if (!spark.sessionState.conf.manageFilesourcePartitions && isDatasourceTable(table)) {
       throw QueryCompilationErrors
         .actionNotAllowedOnTableWithFilesourcePartitionManagementDisabledError(action, tableName)
     }
@@ -1024,7 +1036,8 @@ object DDLUtils extends Logging {
     source match {
       case f: FileFormat => DataSourceUtils.checkFieldNames(f, schema)
       case f: FileDataSourceV2 =>
-        DataSourceUtils.checkFieldNames(f.fallbackFileFormat.newInstance(), schema)
+        DataSourceUtils.checkFieldNames(
+          f.fallbackFileFormat.getDeclaredConstructor().newInstance(), schema)
       case _ =>
     }
   }

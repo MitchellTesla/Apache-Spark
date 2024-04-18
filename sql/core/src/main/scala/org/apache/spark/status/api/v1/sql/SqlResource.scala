@@ -18,10 +18,11 @@
 package org.apache.spark.status.api.v1.sql
 
 import java.util.Date
-import javax.ws.rs._
-import javax.ws.rs.core.MediaType
 
 import scala.util.{Failure, Success, Try}
+
+import jakarta.ws.rs._
+import jakarta.ws.rs.core.MediaType
 
 import org.apache.spark.JobExecutionStatus
 import org.apache.spark.sql.execution.ui.{SparkPlanGraph, SparkPlanGraphCluster, SparkPlanGraphNode, SQLAppStatusStore, SQLExecutionUIData}
@@ -56,10 +57,9 @@ private[v1] class SqlResource extends BaseAppResource {
       planDescription: Boolean): ExecutionData = {
     withUI { ui =>
       val sqlStore = new SQLAppStatusStore(ui.store.store)
-      val graph = sqlStore.planGraph(execId)
       sqlStore
         .execution(execId)
-        .map(prepareExecutionData(_, graph, details, planDescription))
+        .map(prepareExecutionData(_, sqlStore.planGraph(execId), details, planDescription))
         .getOrElse(throw new NotFoundException("unknown query execution id: " + execId))
     }
   }

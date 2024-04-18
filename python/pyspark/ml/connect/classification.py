@@ -14,17 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from typing import Any, Dict, Union, List, Tuple, Callable, Optional
+import math
+
+import numpy as np
+import pandas as pd
 
 from pyspark import keyword_only
 from pyspark.ml.connect.base import _PredictorParams
-
 from pyspark.ml.param.shared import HasProbabilityCol
-
-from typing import Any, Dict, Union, List, Tuple, Callable, Optional
-import numpy as np
-import pandas as pd
-import math
-
 from pyspark.sql import DataFrame
 from pyspark.ml.common import inherit_doc
 from pyspark.ml.torch.distributor import TorchDistributor
@@ -41,10 +39,7 @@ from pyspark.ml.param.shared import (
 )
 from pyspark.ml.connect.base import Predictor, PredictionModel
 from pyspark.ml.connect.io_utils import ParamsReadWrite, CoreModelReadWrite
-from pyspark.sql.functions import lit, count, countDistinct
-
-import torch
-import torch.nn as torch_nn
+from pyspark.sql import functions as sf
 
 
 class _LogisticRegressionParams(
@@ -90,6 +85,8 @@ def _train_logistic_regression_model_worker_fn(
     seed: int,
 ) -> Any:
     from pyspark.ml.torch.distributor import _get_spark_partition_data_loader
+    import torch
+    import torch.nn as torch_nn
     from torch.nn.parallel import DistributedDataParallel as DDP
     import torch.distributed
     import torch.optim as optim
@@ -219,6 +216,9 @@ class LogisticRegression(
         self._set(**kwargs)
 
     def _fit(self, dataset: Union[DataFrame, pd.DataFrame]) -> "LogisticRegressionModel":
+        import torch
+        import torch.nn as torch_nn
+
         if isinstance(dataset, pd.DataFrame):
             # TODO: support pandas dataframe fitting
             raise NotImplementedError("Fitting pandas dataframe is not supported yet.")
@@ -232,18 +232,20 @@ class LogisticRegression(
             num_train_workers
         )
 
-        # TODO: check label values are in range of [0, num_classes)
-        num_rows, num_classes = dataset.agg(
-            count(lit(1)), countDistinct(self.getLabelCol())
+        num_rows, num_features, classes = dataset.select(
+            sf.count(sf.lit(1)),
+            sf.first(sf.array_size(self.getFeaturesCol())),
+            sf.collect_set(self.getLabelCol()),
         ).head()  # type: ignore[misc]
+
+        num_classes = len(classes)
+        if num_classes < 2:
+            raise ValueError("Training dataset distinct labels must >= 2.")
+        if any(c not in range(0, num_classes) for c in classes):
+            raise ValueError("Training labels must be integers in [0, numClasses).")
 
         num_batches_per_worker = math.ceil(num_rows / num_train_workers / batch_size)
         num_samples_per_worker = num_batches_per_worker * batch_size
-
-        num_features = len(dataset.select(self.getFeaturesCol()).head()[0])  # type: ignore[index]
-
-        if num_classes < 2:
-            raise ValueError("Training dataset distinct labels must >= 2.")
 
         # TODO: support GPU.
         distributor = TorchDistributor(
@@ -317,6 +319,9 @@ class LogisticRegressionModel(
         return output_cols
 
     def _get_transform_fn(self) -> Callable[["pd.Series"], Any]:
+        import torch
+        import torch.nn as torch_nn
+
         model_state_dict = self.torch_model.state_dict()
         num_features = self.num_features
         num_classes = self.num_classes
@@ -358,6 +363,9 @@ class LogisticRegressionModel(
         return self.__class__.__name__ + ".torch"
 
     def _save_core_model(self, path: str) -> None:
+        import torch
+        import torch.nn as torch_nn
+
         lor_torch_model = torch_nn.Sequential(
             self.torch_model,
             torch_nn.Softmax(dim=1),
@@ -365,6 +373,8 @@ class LogisticRegressionModel(
         torch.save(lor_torch_model, path)
 
     def _load_core_model(self, path: str) -> None:
+        import torch
+
         lor_torch_model = torch.load(path)
         self.torch_model = lor_torch_model[0]
 

@@ -23,15 +23,14 @@ import java.util.concurrent.TimeUnit
 import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.mutable
-import scala.concurrent.duration.Duration
-import scala.concurrent.duration.DurationInt
+import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
 import scala.util.control.NonFatal
 
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.{DURATION, NEW_VALUE, OLD_VALUE, QUERY_CACHE_VALUE, QUERY_ID, SESSION_ID}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.streaming.StreamingQuery
-import org.apache.spark.util.Clock
-import org.apache.spark.util.SystemClock
+import org.apache.spark.util.{Clock, SystemClock, ThreadUtils}
 
 /**
  * Caches Spark-Connect streaming query references and the sessions. When a query is stopped (i.e.
@@ -67,11 +66,13 @@ private[connect] class SparkConnectStreamingQueryCache(
 
       queryCache.put(QueryCacheKey(query.id.toString, query.runId.toString), value) match {
         case Some(existing) => // Query is being replace. Not really expected.
-          logWarning(
-            s"Replacing existing query in the cache (unexpected). Query Id: ${query.id}." +
-              s"Existing value $existing, new value $value.")
+          logWarning(log"Replacing existing query in the cache (unexpected). " +
+            log"Query Id: ${MDC(QUERY_ID, query.id)}.Existing value ${MDC(OLD_VALUE, existing)}, " +
+            log"new value ${MDC(NEW_VALUE, value)}.")
         case None =>
-          logInfo(s"Adding new query to the cache. Query Id ${query.id}, value $value.")
+          logInfo(
+            log"Adding new query to the cache. Query Id ${MDC(QUERY_ID, query.id)}, " +
+              log"value ${MDC(QUERY_CACHE_VALUE, value)}.")
       }
 
       schedulePeriodicChecks() // Starts the scheduler thread if it hasn't started.
@@ -112,12 +113,17 @@ private[connect] class SparkConnectStreamingQueryCache(
     for ((k, v) <- queryCache) {
       if (v.userId.equals(sessionHolder.userId) && v.sessionId.equals(sessionHolder.sessionId)) {
         if (v.query.isActive && Option(v.session.streams.get(k.queryId)).nonEmpty) {
-          logInfo(s"Stopping the query with id ${k.queryId} since the session has timed out")
+          logInfo(
+            log"Stopping the query with id ${MDC(QUERY_ID, k.queryId)} " +
+              log"since the session has timed out")
           try {
             v.query.stop()
           } catch {
             case NonFatal(ex) =>
-              logWarning(s"Failed to stop the query ${k.queryId}. Error is ignored.", ex)
+              logWarning(
+                log"Failed to stop the query ${MDC(QUERY_ID, k.queryId)}. " +
+                  log"Error is ignored.",
+                ex)
           }
         }
       }
@@ -131,8 +137,7 @@ private[connect] class SparkConnectStreamingQueryCache(
   // Visible for testing.
   private[service] def shutdown(): Unit = queryCacheLock.synchronized {
     scheduledExecutor.foreach { executor =>
-      executor.shutdown()
-      executor.awaitTermination(1, TimeUnit.MINUTES)
+      ThreadUtils.shutdown(executor, FiniteDuration(1, TimeUnit.MINUTES))
     }
     scheduledExecutor = None
   }
@@ -149,7 +154,9 @@ private[connect] class SparkConnectStreamingQueryCache(
     scheduledExecutor match {
       case Some(_) => // Already running.
       case None =>
-        logInfo(s"Starting thread for polling streaming sessions every $sessionPollingPeriod")
+        logInfo(
+          log"Starting thread for polling streaming sessions " +
+            log"every ${MDC(DURATION, sessionPollingPeriod.toMillis)}")
         scheduledExecutor = Some(Executors.newSingleThreadScheduledExecutor())
         scheduledExecutor.get.scheduleAtFixedRate(
           () => {
@@ -179,17 +186,23 @@ private[connect] class SparkConnectStreamingQueryCache(
         v.expiresAtMs match {
 
           case Some(ts) if nowMs >= ts => // Expired. Drop references.
-            logInfo(s"Removing references for $id in session ${v.sessionId} after expiry period")
+            logInfo(
+              log"Removing references for ${MDC(QUERY_ID, id)} in " +
+                log"session ${MDC(SESSION_ID, v.sessionId)} after expiry period")
             queryCache.remove(k)
 
           case Some(_) => // Inactive query waiting for expiration. Do nothing.
-            logInfo(s"Waiting for the expiration for $id in session ${v.sessionId}")
+            logInfo(
+              log"Waiting for the expiration for ${MDC(QUERY_ID, id)} in " +
+                log"session ${MDC(SESSION_ID, v.sessionId)}")
 
           case None => // Active query, check if it is stopped. Enable timeout if it is stopped.
             val isActive = v.query.isActive && Option(v.session.streams.get(id)).nonEmpty
 
             if (!isActive) {
-              logInfo(s"Marking query $id in session ${v.sessionId} inactive.")
+              logInfo(
+                log"Marking query ${MDC(QUERY_ID, id)} in " +
+                  log"session ${MDC(SESSION_ID, v.sessionId)} inactive.")
               val expiresAtMs = nowMs + stoppedQueryInactivityTimeout.toMillis
               queryCache.put(k, v.copy(expiresAtMs = Some(expiresAtMs)))
               // To consider: Clean up any runner registered for this query with the session holder

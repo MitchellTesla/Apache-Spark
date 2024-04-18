@@ -20,7 +20,6 @@ import os
 import time
 import uuid
 import functools
-
 from typing import (
     Any,
     Callable,
@@ -35,8 +34,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-
-from pyspark import SparkContext, since
+from pyspark import since
 from pyspark.ml.common import inherit_doc
 from pyspark.sql import SparkSession
 from pyspark.sql.utils import is_remote
@@ -47,6 +45,7 @@ if TYPE_CHECKING:
     from pyspark.ml._typing import PipelineStage
     from pyspark.ml.base import Params
     from pyspark.ml.wrapper import JavaWrapper
+    from pyspark.core.context import SparkContext
 
 T = TypeVar("T")
 RW = TypeVar("RW", bound="BaseReadWrite")
@@ -63,6 +62,8 @@ def _jvm() -> "JavaGateway":
     Returns the JVM view associated with SparkContext. Must be called
     after SparkContext is initialized.
     """
+    from pyspark.core.context import SparkContext
+
     jvm = SparkContext._jvm
     if jvm:
         return jvm
@@ -121,7 +122,7 @@ class BaseReadWrite:
         return self._sparkSession
 
     @property
-    def sc(self) -> SparkContext:
+    def sc(self) -> "SparkContext":
         """
         Returns the underlying `SparkContext`.
         """
@@ -320,7 +321,7 @@ class JavaMLReader(MLReader[RL]):
             raise NotImplementedError(
                 "This Java ML type cannot be loaded into Python currently: %r" % self._clazz
             )
-        return self._clazz._from_java(java_obj)  # type: ignore[attr-defined]
+        return self._clazz._from_java(java_obj)
 
     def session(self: JR, sparkSession: SparkSession) -> JR:
         """Sets the Spark Session to use for loading."""
@@ -437,7 +438,7 @@ class DefaultParamsWriter(MLWriter):
     def saveMetadata(
         instance: "Params",
         path: str,
-        sc: SparkContext,
+        sc: "SparkContext",
         extraMetadata: Optional[Dict[str, Any]] = None,
         paramMap: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -468,7 +469,7 @@ class DefaultParamsWriter(MLWriter):
     @staticmethod
     def _get_metadata_to_save(
         instance: "Params",
-        sc: SparkContext,
+        sc: "SparkContext",
         extraMetadata: Optional[Dict[str, Any]] = None,
         paramMap: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -564,7 +565,7 @@ class DefaultParamsReader(MLReader[RL]):
         return instance
 
     @staticmethod
-    def loadMetadata(path: str, sc: SparkContext, expectedClassName: str = "") -> Dict[str, Any]:
+    def loadMetadata(path: str, sc: "SparkContext", expectedClassName: str = "") -> Dict[str, Any]:
         """
         Load metadata saved using :py:meth:`DefaultParamsWriter.saveMetadata`
 
@@ -636,7 +637,7 @@ class DefaultParamsReader(MLReader[RL]):
         return metadata["class"].startswith("pyspark.ml.")
 
     @staticmethod
-    def loadParamsInstance(path: str, sc: SparkContext) -> RL:
+    def loadParamsInstance(path: str, sc: "SparkContext") -> RL:
         """
         Load a :py:class:`Params` instance from the given path, and return it.
         This assumes the instance inherits from :py:class:`MLReadable`.
@@ -738,7 +739,6 @@ def try_remote_functions(f: FuncT) -> FuncT:
 
     @functools.wraps(f)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
-
         if is_remote() and "PYSPARK_NO_NAMESPACE_SHARE" not in os.environ:
             from pyspark.ml.connect import functions
 

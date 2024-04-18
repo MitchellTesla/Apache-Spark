@@ -22,13 +22,12 @@ import java.net.URI
 import java.util.{Arrays, Locale, Properties, ServiceLoader, UUID}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
-import javax.ws.rs.core.UriBuilder
 
-import scala.collection.JavaConverters._
 import scala.collection.Map
 import scala.collection.concurrent.{Map => ScalaConcurrentMap}
 import scala.collection.immutable
 import scala.collection.mutable.HashMap
+import scala.jdk.CollectionConverters._
 import scala.language.implicitConversions
 import scala.reflect.{classTag, ClassTag}
 import scala.util.control.NonFatal
@@ -47,7 +46,8 @@ import org.apache.spark.deploy.{LocalSparkCluster, SparkHadoopUtil}
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.{Executor, ExecutorMetrics, ExecutorMetricsSource}
 import org.apache.spark.input.{FixedLengthBinaryInputFormat, PortableDataStream, StreamInputFormat, WholeTextFileInputFormat}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Tests._
 import org.apache.spark.internal.config.UI._
@@ -71,6 +71,7 @@ import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.{TriggerHeapHistogram, TriggerThreadDump}
 import org.apache.spark.ui.{ConsoleProgressBar, SparkUI}
 import org.apache.spark.util._
+import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.logging.DriverLogger
 
 /**
@@ -132,7 +133,7 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Alternative constructor that allows setting common Spark properties directly
    *
-   * @param master Cluster URL to connect to (e.g. mesos://host:port, spark://host:port, local[4]).
+   * @param master Cluster URL to connect to (e.g. spark://host:port, local[4]).
    * @param appName A name for your application, to display on the cluster web UI
    * @param conf a [[org.apache.spark.SparkConf]] object specifying other Spark parameters
    */
@@ -142,7 +143,7 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Alternative constructor that allows setting common Spark properties directly
    *
-   * @param master Cluster URL to connect to (e.g. mesos://host:port, spark://host:port, local[4]).
+   * @param master Cluster URL to connect to (e.g. spark://host:port, local[4]).
    * @param appName A name for your application, to display on the cluster web UI.
    * @param sparkHome Location where Spark is installed on cluster nodes.
    * @param jars Collection of JARs to send to the cluster. These can be paths on the local file
@@ -164,7 +165,7 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Alternative constructor that allows setting common Spark properties directly
    *
-   * @param master Cluster URL to connect to (e.g. mesos://host:port, spark://host:port, local[4]).
+   * @param master Cluster URL to connect to (e.g. spark://host:port, local[4]).
    * @param appName A name for your application, to display on the cluster web UI.
    */
   private[spark] def this(master: String, appName: String) =
@@ -173,7 +174,7 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Alternative constructor that allows setting common Spark properties directly
    *
-   * @param master Cluster URL to connect to (e.g. mesos://host:port, spark://host:port, local[4]).
+   * @param master Cluster URL to connect to (e.g. spark://host:port, local[4]).
    * @param appName A name for your application, to display on the cluster web UI.
    * @param sparkHome Location where Spark is installed on cluster nodes.
    */
@@ -183,7 +184,7 @@ class SparkContext(config: SparkConf) extends Logging {
   /**
    * Alternative constructor that allows setting common Spark properties directly
    *
-   * @param master Cluster URL to connect to (e.g. mesos://host:port, spark://host:port, local[4]).
+   * @param master Cluster URL to connect to (e.g. spark://host:port, local[4]).
    * @param appName A name for your application, to display on the cluster web UI.
    * @param sparkHome Location where Spark is installed on cluster nodes.
    * @param jars Collection of JARs to send to the cluster. These can be paths on the local file
@@ -352,7 +353,6 @@ class SparkContext(config: SparkConf) extends Logging {
    * (i.e.
    *  in case of local spark app something like 'local-1433865536131'
    *  in case of YARN something like 'application_1433865536131_34483'
-   *  in case of MESOS something like 'driver-20170926223339-0001'
    * )
    */
   def applicationId: String = _applicationId
@@ -418,6 +418,9 @@ class SparkContext(config: SparkConf) extends Logging {
     if (!_conf.contains("spark.app.name")) {
       throw new SparkException("An application name must be set in your configuration")
     }
+    // HADOOP-19097 Set fs.s3a.connection.establish.timeout to 30s
+    // We can remove this after Apache Hadoop 3.4.1 releases
+    conf.setIfMissing("spark.hadoop.fs.s3a.connection.establish.timeout", "30s")
     // This should be set as early as possible.
     SparkContext.fillMissingMagicCommitterConfsIfNeeded(_conf)
 
@@ -464,7 +467,8 @@ class SparkContext(config: SparkConf) extends Logging {
       }
 
     _eventLogCodec = {
-      val compress = _conf.get(EVENT_LOG_COMPRESS)
+      val compress = _conf.get(EVENT_LOG_COMPRESS) &&
+          !_conf.get(EVENT_LOG_COMPRESSION_CODEC).equalsIgnoreCase("none")
       if (compress && isEventLogEnabled) {
         Some(_conf.get(EVENT_LOG_COMPRESSION_CODEC)).map(CompressionCodec.getShortName)
       } else {
@@ -556,9 +560,6 @@ class SparkContext(config: SparkConf) extends Logging {
     Option(System.getenv("SPARK_PREPEND_CLASSES")).foreach { v =>
       executorEnvs("SPARK_PREPEND_CLASSES") = v
     }
-    // The Mesos scheduler backend relies on this environment variable to set executor memory.
-    // TODO: Set this only in the Mesos scheduler.
-    executorEnvs("SPARK_EXECUTOR_MEMORY") = executorMemory + "m"
     executorEnvs ++= _conf.getExecutorEnv
     executorEnvs("SPARK_USER") = sparkUser
 
@@ -579,6 +580,8 @@ class SparkContext(config: SparkConf) extends Logging {
 
     // Initialize any plugins before the task scheduler is initialized.
     _plugins = PluginContainer(this, _resources.asJava)
+    _env.initializeShuffleManager()
+    _env.initializeMemoryManager(SparkContext.numDriverCores(master, conf))
 
     // Create and start the scheduler
     val (sched, ts) = SparkContext.createTaskScheduler(this, master)
@@ -746,9 +749,17 @@ class SparkContext(config: SparkConf) extends Logging {
       }
     } catch {
       case e: Exception =>
-        logError(s"Exception getting thread dump from executor $executorId", e)
+        logError(
+          log"Exception getting thread dump from executor ${MDC(LogKey.EXECUTOR_ID, executorId)}",
+          e)
         None
     }
+  }
+
+  private[spark] def getTaskThreadDump(
+      taskId: Long,
+      executorId: String): Option[ThreadStackTrace] = {
+    schedulerBackend.getTaskThreadDump(taskId, executorId)
   }
 
   /**
@@ -770,7 +781,9 @@ class SparkContext(config: SparkConf) extends Logging {
       }
     } catch {
       case e: Exception =>
-        logError(s"Exception getting heap histogram from executor $executorId", e)
+        logError(
+          log"Exception getting heap histogram from " +
+            log"executor ${MDC(LogKey.EXECUTOR_ID, executorId)}", e)
         None
     }
   }
@@ -791,6 +804,8 @@ class SparkContext(config: SparkConf) extends Logging {
    * may have unexpected consequences when working with thread pools. The standard java
    * implementation of thread pools have worker threads spawn other worker threads.
    * As a result, local properties may propagate unpredictably.
+   *
+   * To remove/unset property simply set `value` to null e.g. sc.setLocalProperty("key", null)
    */
   def setLocalProperty(key: String, value: String): Unit = {
     if (value == null) {
@@ -870,6 +885,22 @@ class SparkContext(config: SparkConf) extends Logging {
 
   /**
    * Add a tag to be assigned to all the jobs started by this thread.
+   *
+   * Often, a unit of execution in an application consists of multiple Spark actions or jobs.
+   * Application programmers can use this method to group all those jobs together and give a
+   * group tag. The application can use `org.apache.spark.sql.SparkSession.interruptTag` to cancel
+   * all running executions with this tag. For example:
+   * {{{
+   * // In the main thread:
+   * sc.addJobTag("myjobs")
+   * sc.parallelize(1 to 10000, 2).map { i => Thread.sleep(10); i }.count()
+   *
+   * // In a separate thread:
+   * spark.cancelJobsWithTag("myjobs")
+   * }}}
+   *
+   * There may be multiple tags present at the same time, so different parts of application may use
+   * different tags to perform cancellation at different levels of granularity.
    *
    * @param tag The tag to be added. Cannot contain ',' (comma) character.
    *
@@ -1667,7 +1698,7 @@ class SparkContext(config: SparkConf) extends Logging {
     require(!classOf[RDD[_]].isAssignableFrom(classTag[T].runtimeClass),
       "Can not directly broadcast RDDs; instead, call collect() and broadcast the result.")
     val bc = env.broadcastManager.newBroadcast[T](value, isLocal, serializedOnly)
-    val callSite = getCallSite
+    val callSite = getCallSite()
     logInfo("Created broadcast " + bc.id + " from " + callSite.shortForm)
     cleaner.foreach(_.registerBroadcastForCleanup(bc))
     bc
@@ -1806,12 +1837,12 @@ class SparkContext(config: SparkConf) extends Logging {
         addedArchives
           .getOrElseUpdate(jobArtifactUUID, new ConcurrentHashMap[String, Long]().asScala)
           .putIfAbsent(
-          UriBuilder.fromUri(new URI(key)).fragment(uri.getFragment).build().toString,
+          Utils.getUriBuilder(new URI(key)).fragment(uri.getFragment).build().toString,
           timestamp).isEmpty) {
       logInfo(s"Added archive $path at $key with timestamp $timestamp")
       // If the scheme is file, use URI to simply copy instead of downloading.
       val uriToUse = if (!isLocal && scheme == "file") uri else new URI(key)
-      val uriToDownload = UriBuilder.fromUri(uriToUse).fragment(null).build()
+      val uriToDownload = Utils.getUriBuilder(uriToUse).fragment(null).build()
       val source = Utils.fetchFile(uriToDownload.toString, Utils.createTempDir(), conf,
         hadoopConfiguration, timestamp, useCache = false, shouldUntar = false)
       val dest = new File(
@@ -2114,7 +2145,7 @@ class SparkContext(config: SparkConf) extends Logging {
         Seq(env.rpcEnv.fileServer.addJar(file))
       } catch {
         case NonFatal(e) =>
-          logError(s"Failed to add $path to Spark environment", e)
+          logError(log"Failed to add ${MDC(LogKey.PATH, path)} to Spark environment", e)
           Nil
       }
     }
@@ -2135,7 +2166,7 @@ class SparkContext(config: SparkConf) extends Logging {
           Seq(path)
         } catch {
           case NonFatal(e) =>
-            logError(s"Failed to add $path to Spark environment", e)
+            logError(log"Failed to add ${MDC(LogKey.PATH, path)} to Spark environment", e)
             Nil
         }
       } else {
@@ -2250,7 +2281,7 @@ class SparkContext(config: SparkConf) extends Logging {
 
     if (listenerBus != null) {
       Utils.tryLogNonFatalError {
-        postApplicationEnd()
+        postApplicationEnd(exitCode)
       }
     }
     Utils.tryLogNonFatalError {
@@ -2396,7 +2427,7 @@ class SparkContext(config: SparkConf) extends Logging {
     if (stopped.get()) {
       throw new IllegalStateException("SparkContext has been shutdown")
     }
-    val callSite = getCallSite
+    val callSite = getCallSite()
     val cleanedFunc = clean(func)
     logInfo("Starting job: " + callSite.shortForm)
     if (conf.getBoolean("spark.logLineage", false)) {
@@ -2518,7 +2549,7 @@ class SparkContext(config: SparkConf) extends Logging {
       evaluator: ApproximateEvaluator[U, R],
       timeout: Long): PartialResult[R] = {
     assertNotStopped()
-    val callSite = getCallSite
+    val callSite = getCallSite()
     logInfo("Starting job: " + callSite.shortForm)
     val start = System.nanoTime
     val cleanedFunc = clean(func)
@@ -2548,7 +2579,7 @@ class SparkContext(config: SparkConf) extends Logging {
   {
     assertNotStopped()
     val cleanF = clean(processPartition)
-    val callSite = getCallSite
+    val callSite = getCallSite()
     val waiter = dagScheduler.submitJob(
       rdd,
       (context: TaskContext, iter: Iterator[T]) => cleanF(iter),
@@ -2583,6 +2614,17 @@ class SparkContext(config: SparkConf) extends Logging {
   def cancelJobGroup(groupId: String): Unit = {
     assertNotStopped()
     dagScheduler.cancelJobGroup(groupId)
+  }
+
+  /**
+   * Cancel active jobs for the specified group, as well as the future jobs in this job group.
+   * Note: the maximum number of job groups that can be tracked is set by
+   * 'spark.scheduler.numCancelledJobGroupsToTrack'. Once the limit is reached and a new job group
+   * is to be added, the oldest job group tracked will be discarded.
+   */
+  def cancelJobGroupAndFutureJobs(groupId: String): Unit = {
+    assertNotStopped()
+    dagScheduler.cancelJobGroup(groupId, cancelFutureJobs = true)
   }
 
   /**
@@ -2678,7 +2720,7 @@ class SparkContext(config: SparkConf) extends Logging {
    * @return the cleaned closure
    */
   private[spark] def clean[F <: AnyRef](f: F, checkSerializable: Boolean = true): F = {
-    ClosureCleaner.clean(f, checkSerializable)
+    SparkClosureCleaner.clean(f, checkSerializable)
     f
   }
 
@@ -2712,7 +2754,7 @@ class SparkContext(config: SparkConf) extends Logging {
   /** Default level of parallelism to use when not given by user (e.g. parallelize and makeRDD). */
   def defaultParallelism: Int = {
     assertNotStopped()
-    taskScheduler.defaultParallelism
+    taskScheduler.defaultParallelism()
   }
 
   /**
@@ -2769,8 +2811,8 @@ class SparkContext(config: SparkConf) extends Logging {
   }
 
   /** Post the application end event */
-  private def postApplicationEnd(): Unit = {
-    listenerBus.post(SparkListenerApplicationEnd(System.currentTimeMillis))
+  private def postApplicationEnd(exitCode: Int): Unit = {
+    listenerBus.post(SparkListenerApplicationEnd(System.currentTimeMillis, Some(exitCode)))
   }
 
   /** Post the environment update event once the task scheduler is ready */
@@ -2782,7 +2824,7 @@ class SparkContext(config: SparkConf) extends Logging {
       val addedArchivePaths = allAddedArchives.keys.toSeq
       val environmentDetails = SparkEnv.environmentDetails(conf, hadoopConfiguration,
         schedulingMode, addedJarPaths, addedFilePaths, addedArchivePaths,
-        env.metricsSystem.metricsProperties.asScala.toMap)
+        env.metricsSystem.metricsProperties().asScala.toMap)
       val environmentUpdate = SparkListenerEnvironmentUpdate(environmentDetails)
       listenerBus.post(environmentUpdate)
     }
@@ -2796,7 +2838,7 @@ class SparkContext(config: SparkConf) extends Logging {
     val driverUpdates = new HashMap[(Int, Int), ExecutorMetrics]
     // In the driver, we do not track per-stage metrics, so use a dummy stage for the key
     driverUpdates.put(EventLoggingListener.DRIVER_STAGE_KEY, new ExecutorMetrics(currentMetrics))
-    val accumUpdates = new Array[(Long, Int, Int, Seq[AccumulableInfo])](0)
+    val accumUpdates = new Array[(Long, Int, Int, Seq[AccumulableInfo])](0).toImmutableArraySeq
     listenerBus.post(SparkListenerExecutorMetricsUpdate("driver", accumUpdates,
       driverUpdates))
   }
@@ -3254,7 +3296,7 @@ object SparkContext extends Logging {
   }
 
   /**
-   * SPARK-36796: This is a helper function to supplement `--add-opens` options to
+   * SPARK-36796: This is a helper function to supplement some JVM runtime options to
    * `spark.driver.extraJavaOptions` and `spark.executor.extraJavaOptions`.
    */
   private def supplementJavaModuleOptions(conf: SparkConf): Unit = {

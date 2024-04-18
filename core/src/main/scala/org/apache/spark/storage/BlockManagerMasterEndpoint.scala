@@ -21,17 +21,18 @@ import java.io.IOException
 import java.util.{HashMap => JHashMap}
 import java.util.concurrent.TimeUnit
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future, TimeoutException}
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService, Future, TimeoutException}
+import scala.jdk.CollectionConverters._
 import scala.util.Random
 import scala.util.control.NonFatal
 
 import com.google.common.cache.CacheBuilder
 
-import org.apache.spark.{MapOutputTrackerMaster, SparkConf, SparkContext}
+import org.apache.spark.{MapOutputTrackerMaster, SparkConf, SparkContext, SparkEnv}
 import org.apache.spark.annotation.DeveloperApi
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.{config, Logging, MDC}
+import org.apache.spark.internal.LogKey.{BLOCK_MANAGER_ID, EXECUTOR_ID, OLD_BLOCK_MANAGER_ID}
 import org.apache.spark.internal.config.RDD_CACHE_VISIBILITY_TRACKING_ENABLED
 import org.apache.spark.network.shuffle.{ExternalBlockStoreClient, RemoteBlockPushResolver}
 import org.apache.spark.rpc.{IsolatedThreadSafeRpcEndpoint, RpcCallContext, RpcEndpointRef, RpcEnv}
@@ -40,6 +41,7 @@ import org.apache.spark.scheduler.cluster.{CoarseGrainedClusterMessages, CoarseG
 import org.apache.spark.shuffle.ShuffleManager
 import org.apache.spark.storage.BlockManagerMessages._
 import org.apache.spark.util.{RpcUtils, ThreadUtils, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * BlockManagerMasterEndpoint is an [[IsolatedThreadSafeRpcEndpoint]] on the master node to
@@ -54,9 +56,14 @@ class BlockManagerMasterEndpoint(
     externalBlockStoreClient: Option[ExternalBlockStoreClient],
     blockManagerInfo: mutable.Map[BlockManagerId, BlockManagerInfo],
     mapOutputTracker: MapOutputTrackerMaster,
-    shuffleManager: ShuffleManager,
+    private val _shuffleManager: ShuffleManager,
     isDriver: Boolean)
   extends IsolatedThreadSafeRpcEndpoint with Logging {
+
+  // We initialize the ShuffleManager later in SparkContext and Executor, to allow
+  // user jars to define custom ShuffleManagers, as such `_shuffleManager` will be null here
+  // (except for tests) and we ask for the instance from the SparkEnv.
+  private lazy val shuffleManager = Option(_shuffleManager).getOrElse(SparkEnv.get.shuffleManager)
 
   // Mapping from executor id to the block manager's local disk directories.
   private val executorIdToLocalDirs =
@@ -94,7 +101,8 @@ class BlockManagerMasterEndpoint(
 
   private val askThreadPool =
     ThreadUtils.newDaemonCachedThreadPool("block-manager-ask-thread-pool", 100)
-  private implicit val askExecutionContext = ExecutionContext.fromExecutorService(askThreadPool)
+  private implicit val askExecutionContext: ExecutionContextExecutorService =
+    ExecutionContext.fromExecutorService(askThreadPool)
 
   private val topologyMapper = {
     val topologyMapperClassName = conf.get(
@@ -316,11 +324,12 @@ class BlockManagerMasterEndpoint(
       val isAlive = try {
         driverEndpoint.askSync[Boolean](CoarseGrainedClusterMessages.IsExecutorAlive(executorId))
       } catch {
-        // ignore the non-fatal error from driverEndpoint since the caller doesn't really
-        // care about the return result of removing blocks. And so we could avoid breaking
+        // Ignore the non-fatal error from driverEndpoint since the caller doesn't really
+        // care about the return result of removing blocks. That way we avoid breaking
         // down the whole application.
         case NonFatal(e) =>
-          logError(s"Fail to know the executor $executorId is alive or not.", e)
+          logError(log"Cannot determine whether executor " +
+            log"${MDC(EXECUTOR_ID, executorId)} is alive or not.", e)
           false
       }
       if (!isAlive) {
@@ -690,8 +699,9 @@ class BlockManagerMasterEndpoint(
       blockManagerIdByExecutor.get(id.executorId) match {
         case Some(oldId) =>
           // A block manager of the same executor already exists, so remove it (assumed dead)
-          logError("Got two different block manager registrations on same executor - "
-              + s" will replace old one $oldId with new one $id")
+          logError(log"Got two different block manager registrations on same executor - "
+              + log" will replace old one ${MDC(OLD_BLOCK_MANAGER_ID, oldId)} " +
+            log"with new one ${MDC(BLOCK_MANAGER_ID, id)}")
           removeExecutor(id.executorId)
         case None =>
       }
@@ -877,7 +887,7 @@ class BlockManagerMasterEndpoint(
 
   private def getLocationsMultipleBlockIds(
       blockIds: Array[BlockId]): IndexedSeq[Seq[BlockManagerId]] = {
-    blockIds.map(blockId => getLocations(blockId))
+    blockIds.map(blockId => getLocations(blockId)).toImmutableArraySeq
   }
 
   /** Get the list of the peers of the given block manager */

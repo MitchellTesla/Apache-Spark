@@ -18,7 +18,7 @@ package org.apache.spark.sql.connect.planner
 
 import java.nio.file.{Files, Paths}
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import com.google.protobuf.ByteString
 
@@ -30,7 +30,7 @@ import org.apache.spark.sql.{AnalysisException, Column, DataFrame, Observation, 
 import org.apache.spark.sql.catalyst.analysis
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, GenericInternalRow, UnsafeProjection}
 import org.apache.spark.sql.catalyst.plans.{FullOuter, Inner, LeftAnti, LeftOuter, LeftSemi, PlanTest, RightOuter}
-import org.apache.spark.sql.catalyst.plans.logical.{Distinct, LocalRelation, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.{CollectMetrics, Distinct, LocalRelation, LogicalPlan}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.connect.common.InvalidPlanInput
 import org.apache.spark.sql.connect.common.LiteralValueProtoConverter.toLiteralProto
@@ -307,6 +307,18 @@ class SparkConnectProtoSuite extends PlanTest with SparkConnectPlanTest {
     comparePlans(connectPlan2, sparkPlan2)
   }
 
+  test("GroupingSets expressions") {
+    val connectPlan1 =
+      connectTestRelation.groupingSets(Seq(Seq("id".protoAttr), Seq.empty), "id".protoAttr)(
+        proto_min(proto.Expression.newBuilder().setLiteral(toLiteralProto(1)).build())
+          .as("agg1"))
+    val sparkPlan1 =
+      sparkTestRelation
+        .groupingSets(Seq(Seq(Column("id")), Seq.empty), Column("id"))
+        .agg(min(lit(1)).as("agg1"))
+    comparePlans(connectPlan1, sparkPlan1)
+  }
+
   test("Test as(alias: String)") {
     val connectPlan = connectTestRelation.as("target_table")
     val sparkPlan = sparkTestRelation.as("target_table")
@@ -554,15 +566,6 @@ class SparkConnectProtoSuite extends PlanTest with SparkConnectPlanTest {
     comparePlans(
       connectTestRelation.withColumnsRenamed(Map("id" -> "id1", "id" -> "id2")),
       sparkTestRelation.withColumnsRenamed(Map("id" -> "id1", "id" -> "id2")))
-
-    checkError(
-      exception = intercept[AnalysisException] {
-        transform(
-          connectTestRelation.withColumnsRenamed(
-            Map("id" -> "duplicatedCol", "name" -> "duplicatedCol")))
-      },
-      errorClass = "COLUMN_ALREADY_EXISTS",
-      parameters = Map("columnName" -> "`duplicatedcol`"))
   }
 
   test("Writes fails without path or table") {
@@ -1032,6 +1035,14 @@ class SparkConnectProtoSuite extends PlanTest with SparkConnectPlanTest {
     }
   }
 
+  test("SPARK-47144: Collated string") {
+    Seq("UTF8_BINARY", "UTF8_BINARY_LCASE", "UNICODE", "UNICODE_CI").map(collationName =>
+      Seq(
+        s"select 'abc' collate $collationName",
+        s"select collation('abc' collate $collationName)").map(query =>
+        comparePlans(connect.sql(query), spark.sql(query))))
+  }
+
   private def createLocalRelationProtoByAttributeReferences(
       attrs: Seq[AttributeReference]): proto.Relation = {
     val localRelationBuilder = proto.LocalRelation.newBuilder()
@@ -1067,7 +1078,10 @@ class SparkConnectProtoSuite extends PlanTest with SparkConnectPlanTest {
 
   // Compares proto plan with LogicalPlan.
   private def comparePlans(connectPlan: proto.Relation, sparkPlan: LogicalPlan): Unit = {
+    def normalizeDataframeId(plan: LogicalPlan): LogicalPlan = plan transform {
+      case cm: CollectMetrics => cm.copy(dataframeId = 0)
+    }
     val connectAnalyzed = analyzePlan(transform(connectPlan))
-    comparePlans(connectAnalyzed, sparkPlan, false)
+    comparePlans(normalizeDataframeId(connectAnalyzed), normalizeDataframeId(sparkPlan), false)
   }
 }

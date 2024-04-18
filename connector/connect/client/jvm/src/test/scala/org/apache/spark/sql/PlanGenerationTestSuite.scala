@@ -20,8 +20,8 @@ import java.nio.file.{Files, Path}
 import java.util.{Collections, Properties}
 import java.util.concurrent.atomic.AtomicLong
 
-import scala.collection.JavaConverters._
-import scala.collection.mutable
+import scala.collection.{immutable, mutable}
+import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
 
 import com.google.protobuf.util.JsonFormat
@@ -112,8 +112,7 @@ class PlanGenerationTestSuite
   override protected def beforeAll(): Unit = {
     super.beforeAll()
     val client = SparkConnectClient(InProcessChannelBuilder.forName("/dev/null").build())
-    session =
-      new SparkSession(client, cleaner = SparkSession.cleaner, planIdGenerator = new AtomicLong)
+    session = new SparkSession(client, planIdGenerator = new AtomicLong)
   }
 
   override protected def beforeEach(): Unit = {
@@ -121,7 +120,9 @@ class PlanGenerationTestSuite
   }
 
   override protected def afterAll(): Unit = {
-    session.close()
+    // Don't call client.releaseSession on close(), because the connection details are dummy.
+    session.releaseSessionOnClose = false
+    session.stop()
     if (cleanOrphanedGoldenFiles) {
       cleanOrphanedGoldenFile()
     }
@@ -485,7 +486,7 @@ class PlanGenerationTestSuite
   }
 
   test("as symbol") {
-    simple.as('bar)
+    simple.as(Symbol("bar"))
   }
   test("alias string") {
     simple.alias("fooz")
@@ -513,6 +514,10 @@ class PlanGenerationTestSuite
 
   test("where expr") {
     simple.where("a + id < 1000")
+  }
+
+  test("between expr") {
+    simple.selectExpr("rand(123) BETWEEN 0.1 AND 0.2")
   }
 
   test("unpivot values") {
@@ -693,6 +698,11 @@ class PlanGenerationTestSuite
     simple.distinct()
   }
 
+  test("select collated string") {
+    val schema = StructType(StructField("s", StringType(1)) :: Nil)
+    createLocalRelation(schema.catalogString).select("s")
+  }
+
   /* Column API */
   private def columnTest(name: String)(f: => Column): Unit = {
     test("column " + name) {
@@ -859,6 +869,10 @@ class PlanGenerationTestSuite
 
   columnTest("cast") {
     fn.col("a").cast("long")
+  }
+
+  columnTest("try_cast") {
+    fn.col("a").try_cast("long")
   }
 
   orderColumnTest("desc") {
@@ -1808,6 +1822,14 @@ class PlanGenerationTestSuite
     fn.hours(Column("a"))
   }
 
+  functionTest("collate") {
+    fn.collate(fn.col("g"), "UNICODE")
+  }
+
+  functionTest("collation") {
+    fn.collation(fn.col("g"))
+  }
+
   temporalFunctionTest("convert_timezone with source time zone") {
     fn.convert_timezone(lit("\"Africa/Dakar\""), lit("\"Asia/Urumqi\""), fn.col("t"))
   }
@@ -2118,6 +2140,14 @@ class PlanGenerationTestSuite
 
   temporalFunctionTest("months_between with roundoff") {
     fn.months_between(fn.current_date(), fn.col("d"), roundOff = true)
+  }
+
+  temporalFunctionTest("monthname") {
+    fn.monthname(fn.col("d"))
+  }
+
+  temporalFunctionTest("dayname") {
+    fn.dayname(fn.col("d"))
   }
 
   temporalFunctionTest("next_day") {
@@ -2864,6 +2894,10 @@ class PlanGenerationTestSuite
     fn.java_method(lit("java.util.UUID"), lit("fromString"), fn.col("g"))
   }
 
+  functionTest("try_reflect") {
+    fn.try_reflect(lit("java.util.UUID"), lit("fromString"), fn.col("g"))
+  }
+
   functionTest("typeof") {
     fn.typeof(fn.col("g"))
   }
@@ -3012,6 +3046,12 @@ class PlanGenerationTestSuite
     simple.groupBy(Column("id")).pivot("a").agg(functions.count(Column("b")))
   }
 
+  test("groupingSets") {
+    simple
+      .groupingSets(Seq(Seq(fn.col("a")), Seq.empty[Column]), fn.col("a"))
+      .agg("a" -> "max", "a" -> "count")
+  }
+
   test("width_bucket") {
     simple.select(fn.width_bucket(fn.col("b"), fn.col("b"), fn.col("b"), fn.col("a")))
   }
@@ -3023,7 +3063,7 @@ class PlanGenerationTestSuite
   test("function lit") {
     simple.select(
       fn.lit(fn.col("id")),
-      fn.lit('id),
+      fn.lit(Symbol("id")),
       fn.lit(true),
       fn.lit(68.toByte),
       fn.lit(9872.toShort),
@@ -3037,7 +3077,8 @@ class PlanGenerationTestSuite
       fn.lit('T'),
       fn.lit(Array.tabulate(10)(i => ('A' + i).toChar)),
       fn.lit(Array.tabulate(23)(i => (i + 120).toByte)),
-      fn.lit(mutable.WrappedArray.make(Array[Byte](8.toByte, 6.toByte))),
+      fn.lit(mutable.ArraySeq.make(Array[Byte](8.toByte, 6.toByte))),
+      fn.lit(immutable.ArraySeq.unsafeWrapArray(Array[Int](8, 6))),
       fn.lit(null),
       fn.lit(java.time.LocalDate.of(2020, 10, 10)),
       fn.lit(Decimal.apply(BigDecimal(8997620, 6))),
@@ -3090,7 +3131,7 @@ class PlanGenerationTestSuite
   test("function typedLit") {
     simple.select(
       fn.typedLit(fn.col("id")),
-      fn.typedLit('id),
+      fn.typedLit(Symbol("id")),
       fn.typedLit(1),
       fn.typedLit[String](null),
       fn.typedLit(true),
@@ -3106,7 +3147,8 @@ class PlanGenerationTestSuite
       fn.typedLit('T'),
       fn.typedLit(Array.tabulate(10)(i => ('A' + i).toChar)),
       fn.typedLit(Array.tabulate(23)(i => (i + 120).toByte)),
-      fn.typedLit(mutable.WrappedArray.make(Array[Byte](8.toByte, 6.toByte))),
+      fn.typedLit(mutable.ArraySeq.make(Array[Byte](8.toByte, 6.toByte))),
+      fn.typedLit(immutable.ArraySeq.unsafeWrapArray(Array[Int](8, 6))),
       fn.typedLit(null),
       fn.typedLit(java.time.LocalDate.of(2020, 10, 10)),
       fn.typedLit(Decimal.apply(BigDecimal(8997620, 6))),
@@ -3149,12 +3191,34 @@ class PlanGenerationTestSuite
   }
 
   /* Extensions */
-  test("relation extension") {
+  test("relation extension deprecated") {
     val input = proto.ExamplePluginRelation
       .newBuilder()
       .setInput(simple.plan.getRoot)
       .build()
     session.newDataFrame(com.google.protobuf.Any.pack(input))
+  }
+
+  test("expression extension deprecated") {
+    val extension = proto.ExamplePluginExpression
+      .newBuilder()
+      .setChild(
+        proto.Expression
+          .newBuilder()
+          .setUnresolvedAttribute(proto.Expression.UnresolvedAttribute
+            .newBuilder()
+            .setUnparsedIdentifier("id")))
+      .setCustomField("abc")
+      .build()
+    simple.select(Column(com.google.protobuf.Any.pack(extension)))
+  }
+
+  test("relation extension") {
+    val input = proto.ExamplePluginRelation
+      .newBuilder()
+      .setInput(simple.plan.getRoot)
+      .build()
+    session.newDataFrame(com.google.protobuf.Any.pack(input).toByteArray)
   }
 
   test("expression extension") {
@@ -3168,7 +3232,7 @@ class PlanGenerationTestSuite
             .setUnparsedIdentifier("id")))
       .setCustomField("abc")
       .build()
-    simple.select(Column(com.google.protobuf.Any.pack(extension)))
+    simple.select(Column.forExtension(com.google.protobuf.Any.pack(extension).toByteArray))
   }
 
   test("crosstab") {

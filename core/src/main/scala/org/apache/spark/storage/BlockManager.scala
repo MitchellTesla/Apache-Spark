@@ -24,11 +24,11 @@ import java.nio.channels.Channels
 import java.util.Collections
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, TimeUnit}
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.HashMap
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
+import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
 import scala.util.{Failure, Random, Success, Try}
 import scala.util.control.NonFatal
@@ -41,9 +41,9 @@ import org.apache.commons.io.IOUtils
 import org.apache.spark._
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.DataReadMethod
-import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config
-import org.apache.spark.internal.config.{Network, RDD_CACHE_VISIBILITY_TRACKING_ENABLED}
+import org.apache.spark.internal.{config, Logging, MDC}
+import org.apache.spark.internal.LogKey.{BLOCK_ID, COUNT, SLEEP_TIME}
+import org.apache.spark.internal.config.{Network, RDD_CACHE_VISIBILITY_TRACKING_ENABLED, Tests}
 import org.apache.spark.memory.{MemoryManager, MemoryMode}
 import org.apache.spark.metrics.source.Source
 import org.apache.spark.network._
@@ -62,6 +62,7 @@ import org.apache.spark.storage.BlockManagerMessages.{DecommissionBlockManager, 
 import org.apache.spark.storage.memory._
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util._
+import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.io.ChunkedByteBuffer
 
 /* Class for returning a fetched block and associated metrics. */
@@ -85,6 +86,13 @@ private[spark] trait BlockData {
    */
   def toNetty(): Object
 
+  /**
+   * Returns a Netty-friendly wrapper for the block's data.
+   *
+   * Please see `ManagedBuffer.convertToNettyForSsl()` for more details.
+   */
+  def toNettyForSsl(): Object
+
   def toChunkedByteBuffer(allocator: Int => ByteBuffer): ChunkedByteBuffer
 
   def toByteBuffer(): ByteBuffer
@@ -102,6 +110,8 @@ private[spark] class ByteBufferBlockData(
   override def toInputStream(): InputStream = buffer.toInputStream()
 
   override def toNetty(): Object = buffer.toNetty
+
+  override def toNettyForSsl(): AnyRef = buffer.toNettyForSsl
 
   override def toChunkedByteBuffer(allocator: Int => ByteBuffer): ChunkedByteBuffer = {
     buffer.copy(allocator)
@@ -175,13 +185,24 @@ private[spark] class BlockManager(
     val master: BlockManagerMaster,
     val serializerManager: SerializerManager,
     val conf: SparkConf,
-    memoryManager: MemoryManager,
+    private val _memoryManager: MemoryManager,
     mapOutputTracker: MapOutputTracker,
-    shuffleManager: ShuffleManager,
+    private val _shuffleManager: ShuffleManager,
     val blockTransferService: BlockTransferService,
     securityManager: SecurityManager,
     externalBlockStoreClient: Option[ExternalBlockStoreClient])
   extends BlockDataManager with BlockEvictionHandler with Logging {
+
+  // We initialize the ShuffleManager later in SparkContext and Executor, to allow
+  // user jars to define custom ShuffleManagers, as such `_shuffleManager` will be null here
+  // (except for tests) and we ask for the instance from the SparkEnv.
+  private lazy val shuffleManager = Option(_shuffleManager).getOrElse(SparkEnv.get.shuffleManager)
+
+  // Similarly, we also initialize MemoryManager later after DriverPlugin is loaded, to
+  // allow the plugin to overwrite certain memory configurations. The `_memoryManager` will be
+  // null here and we ask for the instance from SparkEnv
+  private[spark] lazy val memoryManager =
+    Option(_memoryManager).getOrElse(SparkEnv.get.memoryManager)
 
   // same as `conf.get(config.SHUFFLE_SERVICE_ENABLED)`
   private[spark] val externalShuffleServiceEnabled: Boolean = externalBlockStoreClient.isDefined
@@ -209,17 +230,19 @@ private[spark] class BlockManager(
     ThreadUtils.newDaemonCachedThreadPool("block-manager-future", 128))
 
   // Actual storage of where blocks are kept
-  private[spark] val memoryStore =
-    new MemoryStore(conf, blockInfoManager, serializerManager, memoryManager, this)
+  private[spark] lazy val memoryStore = {
+    val store = new MemoryStore(conf, blockInfoManager, serializerManager, memoryManager, this)
+    memoryManager.setMemoryStore(store)
+    store
+  }
   private[spark] val diskStore = new DiskStore(conf, diskBlockManager, securityManager)
-  memoryManager.setMemoryStore(memoryStore)
 
   // Note: depending on the memory manager, `maxMemory` may actually vary over time.
   // However, since we use this only for reporting and logging, what we actually want here is
   // the absolute maximum value that `maxMemory` can ever possibly reach. We may need
   // to revisit whether reporting this value as the "max" is intuitive to the user.
-  private val maxOnHeapMemory = memoryManager.maxOnHeapStorageMemory
-  private val maxOffHeapMemory = memoryManager.maxOffHeapStorageMemory
+  private lazy val maxOnHeapMemory = memoryManager.maxOnHeapStorageMemory
+  private lazy val maxOffHeapMemory = memoryManager.maxOffHeapStorageMemory
 
   private[spark] val externalShuffleServicePort = StorageUtils.externalShuffleServicePort(conf)
 
@@ -527,7 +550,7 @@ private[spark] class BlockManager(
       logInfo(s"external shuffle service port = $externalShuffleServicePort")
       shuffleServerId = BlockManagerId(executorId, blockTransferService.hostName,
         externalShuffleServicePort)
-      if (!isDriver) {
+      if (!isDriver && !(Utils.isTesting && conf.get(Tests.TEST_SKIP_ESS_REGISTER))) {
         registerWithExternalShuffleServer()
       }
     }
@@ -577,12 +600,15 @@ private[spark] class BlockManager(
 
   private def registerWithExternalShuffleServer(): Unit = {
     logInfo("Registering executor with local external shuffle service.")
+    // we obtain the class name from the configuration, instead of the ShuffleManager
+    // instance because the ShuffleManager has not been created at this point.
+    val shuffleMgrClass = ShuffleManager.getShuffleManagerClassName(conf)
     val shuffleManagerMeta =
       if (Utils.isPushBasedShuffleEnabled(conf, isDriver = isDriver, checkSerializer = false)) {
-        s"${shuffleManager.getClass.getName}:" +
+        s"${shuffleMgrClass}:" +
           s"${diskBlockManager.getMergeDirectoryAndAttemptIDJsonString()}}}"
       } else {
-        shuffleManager.getClass.getName
+        shuffleMgrClass
       }
     val shuffleConfig = new ExecutorShuffleInfo(
       diskBlockManager.localDirsString,
@@ -590,7 +616,7 @@ private[spark] class BlockManager(
       shuffleManagerMeta)
 
     val MAX_ATTEMPTS = conf.get(config.SHUFFLE_REGISTRATION_MAX_ATTEMPTS)
-    val SLEEP_TIME_SECS = 5
+    val SLEEP_TIME_MS = 5000
 
     for (i <- 1 to MAX_ATTEMPTS) {
       try {
@@ -600,9 +626,10 @@ private[spark] class BlockManager(
         return
       } catch {
         case e: Exception if i < MAX_ATTEMPTS =>
-          logError(s"Failed to connect to external shuffle server, will retry ${MAX_ATTEMPTS - i}"
-            + s" more times after waiting $SLEEP_TIME_SECS seconds...", e)
-          Thread.sleep(SLEEP_TIME_SECS * 1000L)
+          logError(log"Failed to connect to external shuffle server, will retry " +
+            log"${MDC(COUNT, MAX_ATTEMPTS - i)} more times after waiting " +
+            log"${MDC(SLEEP_TIME, SLEEP_TIME_MS)} ms...", e)
+          Thread.sleep(SLEEP_TIME_MS)
         case NonFatal(e) => throw SparkCoreErrors.unableToRegisterWithExternalShuffleServerError(e)
       }
     }
@@ -623,7 +650,7 @@ private[spark] class BlockManager(
     for ((blockId, info) <- blockInfoManager.entries) {
       val status = getCurrentBlockStatus(blockId, info)
       if (info.tellMaster && !tryToReportBlockStatus(blockId, status)) {
-        logError(s"Failed to report $blockId to master; giving up.")
+        logError(log"Failed to report ${MDC(BLOCK_ID, blockId)} to master; giving up.")
         return
       }
     }
@@ -830,7 +857,7 @@ private[spark] class BlockManager(
     (blockInfoManager.entries.map(_._1) ++ diskBlockManager.getAllBlocks())
       .filter(filter)
       .toArray
-      .toSeq
+      .toImmutableArraySeq
   }
 
   /**
@@ -867,7 +894,10 @@ private[spark] class BlockManager(
     val storageLevel = status.storageLevel
     val inMemSize = Math.max(status.memSize, droppedMemorySize)
     val onDiskSize = status.diskSize
-    master.updateBlockInfo(blockManagerId, blockId, storageLevel, inMemSize, onDiskSize)
+    // Yet `blockId` could only be `ShuffleIndexBlockId` or `ShuffleDataBlockId` when it's a
+    // shuffle block because of decommission.
+    val bmId = if (blockId.isShuffle) shuffleServerId else blockManagerId
+    master.updateBlockInfo(bmId, blockId, storageLevel, inMemSize, onDiskSize)
   }
 
   /**
@@ -1240,7 +1270,8 @@ private[spark] class BlockManager(
             new EncryptedBlockData(file, blockSize, conf, key))
 
         case _ =>
-          val transportConf = SparkTransportConf.fromSparkConf(conf, "shuffle")
+          val transportConf = SparkTransportConf.fromSparkConf(
+            conf, "shuffle", sslOptions = Some(securityManager.getRpcSSLOptions()))
           new FileSegmentManagedBuffer(transportConf, file, 0, file.length)
       }
       Some(managedBuffer)
@@ -1303,7 +1334,7 @@ private[spark] class BlockManager(
     val taskAttemptId = taskContext.map(_.taskAttemptId())
     // SPARK-27666. When a task completes, Spark automatically releases all the blocks locked
     // by this task. We should not release any locks for a task that is already completed.
-    if (taskContext.isDefined && taskContext.get.isCompleted) {
+    if (taskContext.isDefined && taskContext.get.isCompleted()) {
       logWarning(s"Task ${taskAttemptId.get} already completed, not releasing lock for $blockId")
     } else {
       blockInfoManager.unlock(blockId, taskAttemptId)
@@ -1510,14 +1541,10 @@ private[spark] class BlockManager(
 
     val putBlockInfo = {
       val newInfo = new BlockInfo(level, classTag, tellMaster)
-      if (blockInfoManager.lockNewBlockForWriting(blockId, newInfo)) {
+      if (blockInfoManager.lockNewBlockForWriting(blockId, newInfo, keepReadLock)) {
         newInfo
       } else {
         logWarning(s"Block $blockId already exists on this machine; not re-adding it")
-        if (!keepReadLock) {
-          // lockNewBlockForWriting returned a read lock on the existing block, so we must free it:
-          releaseLock(blockId)
-        }
         return None
       }
     }
@@ -1535,8 +1562,8 @@ private[spark] class BlockManager(
           blockInfoManager.unlock(blockId)
         }
       } else {
-        removeBlockInternal(blockId, tellMaster = false)
         logWarning(s"Putting block $blockId failed")
+        removeBlockInternal(blockId, tellMaster = false)
       }
       res
     } catch {
@@ -2039,10 +2066,10 @@ private[spark] class BlockManager(
    *
    * @return The number of blocks removed.
    */
-  def removeCache(userId: String, sessionId: String): Int = {
-    logDebug(s"Removing cache of user id = $userId in the session $sessionId")
+  def removeCache(sessionUUID: String): Int = {
+    logDebug(s"Removing cache of spark session with UUID: $sessionUUID")
     val blocksToRemove = blockInfoManager.entries.map(_._1).collect {
-      case cid: CacheId if cid.userId == userId && cid.sessionId == sessionId => cid
+      case cid: CacheId if cid.sessionUUID == sessionUUID => cid
     }
     blocksToRemove.foreach { blockId => removeBlock(blockId) }
     blocksToRemove.size
@@ -2142,7 +2169,7 @@ private[spark] object BlockManager {
     // blockManagerMaster != null is used in tests
     assert(env != null || blockManagerMaster != null)
     val blockLocations: Seq[Seq[BlockManagerId]] = if (blockManagerMaster == null) {
-      env.blockManager.getLocationBlockIds(blockIds)
+      env.blockManager.getLocationBlockIds(blockIds).toImmutableArraySeq
     } else {
       blockManagerMaster.getLocations(blockIds)
     }
@@ -2191,7 +2218,6 @@ private[spark] object BlockManager {
       new ConcurrentHashMap)
 
     private val POLL_TIMEOUT = 1000
-    @volatile private var stopped = false
 
     private val cleaningThread = new Thread() { override def run(): Unit = { keepCleaning() } }
     cleaningThread.setDaemon(true)
@@ -2217,13 +2243,13 @@ private[spark] object BlockManager {
     }
 
     def stop(): Unit = {
-      stopped = true
       cleaningThread.interrupt()
       cleaningThread.join()
     }
 
     private def keepCleaning(): Unit = {
-      while (!stopped) {
+      var running = true
+      while (running) {
         try {
           Option(referenceQueue.remove(POLL_TIMEOUT))
             .map(_.asInstanceOf[ReferenceWithCleanup])
@@ -2233,7 +2259,7 @@ private[spark] object BlockManager {
             }
         } catch {
           case _: InterruptedException =>
-            // no-op
+            running = false
           case NonFatal(e) =>
             logError("Error in cleaning thread", e)
         }

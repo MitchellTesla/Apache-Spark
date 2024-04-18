@@ -261,13 +261,21 @@ struct<>
 org.apache.spark.sql.AnalysisException
 {
   "errorClass" : "NOT_SUPPORTED_CHANGE_COLUMN",
+  "sqlState" : "0A000",
   "messageParameters" : {
     "newName" : "`c`",
     "newType" : "\"CHAR(6)\"",
     "originName" : "`c`",
     "originType" : "\"CHAR(5)\"",
     "table" : "`spark_catalog`.`default`.`char_tbl1`"
-  }
+  },
+  "queryContext" : [ {
+    "objectType" : "",
+    "objectName" : "",
+    "startIndex" : 1,
+    "stopIndex" : 50,
+    "fragment" : "alter table char_tbl1 change column c type char(6)"
+  } ]
 }
 
 

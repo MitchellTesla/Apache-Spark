@@ -16,9 +16,9 @@
  */
 package org.apache.spark.sql.errors
 
-import org.apache.spark.{SparkArithmeticException, SparkException, SparkIllegalArgumentException, SparkNumberFormatException, SparkRuntimeException, SparkUnsupportedOperationException}
+import org.apache.spark.{QueryContext, SparkArithmeticException, SparkException, SparkIllegalArgumentException, SparkNumberFormatException, SparkRuntimeException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.trees.{Origin, SQLQueryContext}
+import org.apache.spark.sql.catalyst.trees.Origin
 import org.apache.spark.sql.catalyst.util.QuotingUtils
 import org.apache.spark.sql.catalyst.util.QuotingUtils.toSQLSchema
 import org.apache.spark.sql.types.{DataType, Decimal, StringType}
@@ -27,13 +27,11 @@ import org.apache.spark.unsafe.types.UTF8String
 /**
  * Object for grouping error messages from (most) exceptions thrown during query execution.
  * This does not include exceptions thrown during the eager execution of commands, which are
- * grouped into [[QueryCompilationErrors]].
+ * grouped into [[CompilationErrors]].
  */
 private[sql] object DataTypeErrors extends DataTypeErrorsBase {
   def unsupportedOperationExceptionError(): SparkUnsupportedOperationException = {
-    new SparkUnsupportedOperationException(
-      errorClass = "_LEGACY_ERROR_TEMP_2225",
-      messageParameters = Map.empty)
+    new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_2225")
   }
 
   def decimalPrecisionExceedsMaxPrecisionError(
@@ -191,7 +189,7 @@ private[sql] object DataTypeErrors extends DataTypeErrorsBase {
       value: Decimal,
       decimalPrecision: Int,
       decimalScale: Int,
-      context: SQLQueryContext = null): ArithmeticException = {
+      context: QueryContext = null): ArithmeticException = {
     numericValueOutOfRange(value, decimalPrecision, decimalScale, context)
   }
 
@@ -199,7 +197,7 @@ private[sql] object DataTypeErrors extends DataTypeErrorsBase {
       value: Decimal,
       decimalPrecision: Int,
       decimalScale: Int,
-      context: SQLQueryContext = null): ArithmeticException = {
+      context: QueryContext = null): ArithmeticException = {
     numericValueOutOfRange(value, decimalPrecision, decimalScale, context)
   }
 
@@ -207,9 +205,9 @@ private[sql] object DataTypeErrors extends DataTypeErrorsBase {
       value: Decimal,
       decimalPrecision: Int,
       decimalScale: Int,
-      context: SQLQueryContext): ArithmeticException = {
+      context: QueryContext): ArithmeticException = {
     new SparkArithmeticException(
-      errorClass = "NUMERIC_VALUE_OUT_OF_RANGE",
+      errorClass = "NUMERIC_VALUE_OUT_OF_RANGE.WITH_SUGGESTION",
       messageParameters = Map(
         "value" -> value.toPlainString,
         "precision" -> decimalPrecision.toString,
@@ -222,7 +220,7 @@ private[sql] object DataTypeErrors extends DataTypeErrorsBase {
   def invalidInputInCastToNumberError(
       to: DataType,
       s: UTF8String,
-      context: SQLQueryContext): SparkNumberFormatException = {
+      context: QueryContext): SparkNumberFormatException = {
     val convertedValueStr = "'" + s.toString.replace("\\", "\\\\").replace("'", "\\'") + "'"
     new SparkNumberFormatException(
       errorClass = "CAST_INVALID_INPUT",
@@ -263,10 +261,14 @@ private[sql] object DataTypeErrors extends DataTypeErrorsBase {
       messageParameters = Map("raw" -> s"'$raw'"))
   }
 
-  def fieldIndexOnRowWithoutSchemaError(): SparkUnsupportedOperationException = {
+  def fieldIndexOnRowWithoutSchemaError(fieldName: String): SparkUnsupportedOperationException = {
     new SparkUnsupportedOperationException(
-      errorClass = "_LEGACY_ERROR_TEMP_2231",
-      messageParameters = Map.empty)
+      errorClass = "UNSUPPORTED_CALL.FIELD_INDEX",
+      messageParameters = Map(
+        "methodName" -> "fieldIndex",
+        "className" -> "Row",
+        "fieldName" -> toSQLId(fieldName))
+    )
   }
 
   def valueIsNullError(index: Int): Throwable = {

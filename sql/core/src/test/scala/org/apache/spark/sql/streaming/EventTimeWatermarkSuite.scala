@@ -28,7 +28,6 @@ import org.scalatest.BeforeAndAfter
 import org.scalatest.matchers.must.Matchers
 import org.scalatest.matchers.should.Matchers._
 
-import org.apache.spark.SparkException
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{AnalysisException, DataFrame, Dataset}
 import org.apache.spark.sql.catalyst.plans.logical.EventTimeWatermark
@@ -74,14 +73,15 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
     // Make sure `largeValue` will cause overflow if we use a Long sum to calc avg.
     assert(largeValue * largeValue != BigInt(largeValue) * BigInt(largeValue))
     val stats =
-      EventTimeStats(max = largeValue, min = largeValue, avg = largeValue, count = largeValue - 1)
+      EventTimeStats(
+        max = largeValue, min = largeValue, avg = largeValue.toDouble, count = largeValue - 1)
     stats.add(largeValue)
     stats.avg should be (largeValue.toDouble +- epsilon)
 
     val stats2 = EventTimeStats(
       max = largeValue + 1,
       min = largeValue,
-      avg = largeValue + 1,
+      avg = largeValue + 1.0,
       count = largeValue)
     stats.merge(stats2)
     stats.avg should be ((largeValue + 0.5) +- epsilon)
@@ -651,10 +651,9 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
           (input1, Seq(("A", 200L), ("B", 300L))),
           (input2, Seq(("A", 190L), ("C", 350L)))
         ),
-        ExpectFailure[SparkException](assertFailure = exc => {
-          val cause = exc.getCause
-          assert(cause.getMessage.contains("More than one event time columns are available."))
-          assert(cause.getMessage.contains(
+        ExpectFailure[AnalysisException](assertFailure = ex => {
+          assert(ex.getMessage.contains("More than one event time columns are available."))
+          assert(ex.getMessage.contains(
             "Please ensure there is at most one event time column per stream."))
         })
       )
@@ -911,7 +910,7 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
             (MONTHS_PER_YEAR * DAYS_PER_MONTH + 2 * DAYS_PER_MONTH) * MILLIS_PER_DAY)
         ).foreach { case (delayThresholdVariants, expectedMs) =>
           delayThresholdVariants.foreach { case delayThreshold =>
-            val df = MemoryStream[Int].toDF
+            val df = MemoryStream[Int].toDF()
               .withColumn("eventTime", timestamp_seconds($"value"))
               .withWatermark("eventTime", delayThreshold)
             val eventTimeAttr = df.queryExecution.analyzed.output.find(a => a.name == "eventTime")
@@ -932,7 +931,7 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
           "interval '1 2:3:4' day to hour",
           "interval '1 2' year to month").foreach { delayThreshold =>
           intercept[AnalysisException] {
-            val df = MemoryStream[Int].toDF
+            val df = MemoryStream[Int].toDF()
               .withColumn("eventTime", timestamp_seconds($"value"))
               .withWatermark("eventTime", delayThreshold)
           }
@@ -944,10 +943,10 @@ class EventTimeWatermarkSuite extends StreamTest with BeforeAndAfter with Matche
   private def dfWithMultipleWatermarks(
       input1: MemoryStream[Int],
       input2: MemoryStream[Int]): Dataset[_] = {
-    val df1 = input1.toDF
+    val df1 = input1.toDF()
       .withColumn("eventTime", timestamp_seconds($"value"))
       .withWatermark("eventTime", "10 seconds")
-    val df2 = input2.toDF
+    val df2 = input2.toDF()
       .withColumn("eventTime", timestamp_seconds($"value"))
       .withWatermark("eventTime", "15 seconds")
     df1.union(df2).select($"eventTime".cast("int"))

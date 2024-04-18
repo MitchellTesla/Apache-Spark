@@ -64,6 +64,54 @@ SELECT
 FROM aggr;
 
 SELECT
+  round(v, 0) WITHIN GROUP (ORDER BY v)
+FROM aggr;
+
+SELECT
+  round(v, 0) WITHIN GROUP (ORDER BY v) OVER (PARTITION BY k)
+FROM aggr;
+
+SELECT
+  percentile(v, 0.5) WITHIN GROUP (ORDER BY v)
+FROM aggr;
+
+SELECT
+  percentile(v, 0.5) WITHIN GROUP (ORDER BY v) OVER (PARTITION BY k)
+FROM aggr;
+
+SELECT
+  percentile_cont(DISTINCT 0.5) WITHIN GROUP (ORDER BY v)
+FROM aggr;
+
+SELECT
+  percentile_cont(DISTINCT 0.5) WITHIN GROUP (ORDER BY v) OVER (PARTITION BY k)
+FROM aggr;
+
+SELECT
+  percentile_cont() WITHIN GROUP (ORDER BY v)
+FROM aggr;
+
+SELECT
+  percentile_cont() WITHIN GROUP (ORDER BY v) OVER (PARTITION BY k)
+FROM aggr;
+
+SELECT
+  percentile_cont(0.5)
+FROM aggr;
+
+SELECT
+  percentile_cont(0.5) OVER (PARTITION BY k)
+FROM aggr;
+
+SELECT
+  percentile_cont(0.5) WITHIN GROUP (ORDER BY k, v)
+FROM aggr;
+
+SELECT
+  percentile_cont(k, 0.5) WITHIN GROUP (ORDER BY v)
+FROM aggr;
+
+SELECT
   k,
   median(v),
   percentile(v, 0.5),
@@ -373,5 +421,9 @@ SELECT
   percentile_disc(0.9) WITHIN GROUP (ORDER BY a) as p9,
   percentile_disc(1.0) WITHIN GROUP (ORDER BY a) as p10
 FROM VALUES (0), (1), (2), (3), (4) AS v(a);
+
+SELECT
+  percentile_cont(b) WITHIN GROUP (ORDER BY a DESC) as p0
+FROM values (12, 0.25), (13, 0.25), (22, 0.25) as v(a, b);
 
 SET spark.sql.legacy.percentileDiscCalculation = false;

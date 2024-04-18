@@ -85,7 +85,7 @@ case class ApproxCountDistinctForIntervals(
       DataTypeMismatch(
         errorSubClass = "NON_FOLDABLE_INPUT",
         messageParameters = Map(
-          "inputName" -> "endpointsExpression",
+          "inputName" -> toSQLId("endpointsExpression"),
           "inputType" -> toSQLType(endpointsExpression.dataType)))
     } else {
       endpointsExpression.dataType match {
@@ -104,7 +104,7 @@ case class ApproxCountDistinctForIntervals(
           DataTypeMismatch(
             errorSubClass = "UNEXPECTED_INPUT_TYPE",
             messageParameters = Map(
-              "paramIndex" -> "2",
+              "paramIndex" -> ordinalNumber(1),
               "requiredType" -> s"ARRAY OF $requiredElemTypes",
               "inputSql" -> toSQLExpr(endpointsExpression),
               "inputType" -> toSQLType(inputType)))

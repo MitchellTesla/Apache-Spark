@@ -25,6 +25,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{CTEInChildren, CTERelationDe
 import org.apache.spark.sql.catalyst.util.CharVarcharUtils
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.command.{DataWritingCommand, LeafRunnableCommand}
+import org.apache.spark.sql.hive.execution.InsertIntoHiveTable.BY_CTAS
 
 /**
  * Create table and insert the query result into it.
@@ -65,7 +66,7 @@ case class CreateHiveTableAsSelectCommand(
       qe.assertCommandExecuted()
     } else {
       tableDesc.storage.locationUri.foreach { p =>
-        DataWritingCommand.assertEmptyRootPath(p, mode, sparkSession.sessionState.newHadoopConf)
+        DataWritingCommand.assertEmptyRootPath(p, mode, sparkSession.sessionState.newHadoopConf())
       }
       // TODO ideally, we should get the output data ready first and then
       // add the relation into catalog, just in case of failure occurs while data
@@ -98,13 +99,15 @@ case class CreateHiveTableAsSelectCommand(
       tableExists: Boolean): DataWritingCommand = {
     // For CTAS, there is no static partition values to insert.
     val partition = tableDesc.partitionColumnNames.map(_ -> None).toMap
-    InsertIntoHiveTable(
+    val insertHive = InsertIntoHiveTable(
       tableDesc,
       partition,
       query,
       overwrite = false,
       ifPartitionNotExists = false,
       outputColumnNames = outputColumnNames)
+    insertHive.setTagValue(BY_CTAS, ())
+    insertHive
   }
 
   override def argString(maxFields: Int): String = {

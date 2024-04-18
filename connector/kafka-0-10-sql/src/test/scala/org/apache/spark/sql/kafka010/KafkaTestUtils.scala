@@ -24,11 +24,10 @@ import java.util.{Collections, Properties, UUID}
 import java.util.concurrent.TimeUnit
 import javax.security.auth.login.Configuration
 
-import scala.collection.JavaConverters._
 import scala.io.Source
+import scala.jdk.CollectionConverters._
 
 import com.google.common.io.Files
-import kafka.api.Request
 import kafka.server.{HostedPartition, KafkaConfig, KafkaServer}
 import kafka.server.checkpoints.OffsetCheckpointFile
 import kafka.zk.KafkaZkClient
@@ -40,6 +39,7 @@ import org.apache.kafka.clients.producer._
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.config.SaslConfigs
 import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.security.auth.SecurityProtocol.{PLAINTEXT, SASL_PLAINTEXT}
 import org.apache.kafka.common.serialization.StringSerializer
 import org.apache.kafka.common.utils.SystemTime
@@ -51,9 +51,11 @@ import org.scalatest.concurrent.Eventually._
 import org.scalatest.time.SpanSugar._
 
 import org.apache.spark.{SparkConf, SparkException}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey
 import org.apache.spark.kafka010.KafkaTokenUtil
 import org.apache.spark.util.{SecurityUtils, ShutdownHookManager, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * This is a helper class for Kafka test suites. This has the functionality to set up
@@ -68,7 +70,7 @@ class KafkaTestUtils(
   private val JAVA_AUTH_CONFIG = "java.security.auth.login.config"
 
   private val localHostNameForURI = Utils.localHostNameForURI()
-  logInfo(s"Local host name is $localHostNameForURI")
+  logInfo(log"Local host name is ${MDC(LogKey.URI, localHostNameForURI)}")
 
   // MiniKDC uses canonical host name on host part, hence we need to provide canonical host name
   // on the 'host' part of the principal.
@@ -331,7 +333,7 @@ class KafkaTestUtils(
         Utils.deleteRecursively(new File(f))
       } catch {
         case e: IOException if Utils.isWindows =>
-          logWarning(e.getMessage)
+          logWarning(log"${MDC(LogKey.ERROR, e.getMessage)}")
       }
     }
 
@@ -377,7 +379,8 @@ class KafkaTestUtils(
   }
 
   def getAllTopicsAndPartitionSize(): Seq[(String, Int)] = {
-    zkClient.getPartitionsForTopics(zkClient.getAllTopicsInCluster()).mapValues(_.size).toSeq
+    zkClient.getPartitionsForTopics(zkClient.getAllTopicsInCluster())
+      .map { case (k, v) => (k, v.size) }.toSeq
   }
 
   /** Create a Kafka topic and wait until it is propagated to the whole cluster */
@@ -438,6 +441,10 @@ class KafkaTestUtils(
       }
     }
     offsets
+  }
+
+  def sendMessages(msgs: Array[ProducerRecord[String, String]]): Seq[(String, RecordMetadata)] = {
+    sendMessages(msgs.toImmutableArraySeq)
   }
 
   def cleanupLogs(): Unit = {
@@ -597,7 +604,7 @@ class KafkaTestUtils(
         .getPartitionInfo(topic, partition) match {
       case Some(partitionState) =>
         zkClient.getLeaderForPartition(new TopicPartition(topic, partition)).isDefined &&
-          Request.isValidBrokerId(partitionState.leader) &&
+          FetchRequest.isValidBrokerId(partitionState.leader) &&
           !partitionState.replicas.isEmpty
 
       case _ =>
@@ -643,20 +650,17 @@ class KafkaTestUtils(
 
     def shutdown(): Unit = {
       factory.shutdown()
-      // The directories are not closed even if the ZooKeeper server is shut down.
-      // Please see ZOOKEEPER-1844, which is fixed in 3.4.6+. It leads to test failures
-      // on Windows if the directory deletion failure throws an exception.
       try {
         Utils.deleteRecursively(snapshotDir)
       } catch {
         case e: IOException if Utils.isWindows =>
-          logWarning(e.getMessage)
+          logWarning(log"${MDC(LogKey.ERROR, e.getMessage)}")
       }
       try {
         Utils.deleteRecursively(logDir)
       } catch {
         case e: IOException if Utils.isWindows =>
-          logWarning(e.getMessage)
+          logWarning(log"${MDC(LogKey.ERROR, e.getMessage)}")
       }
       System.clearProperty(ZOOKEEPER_AUTH_PROVIDER)
     }

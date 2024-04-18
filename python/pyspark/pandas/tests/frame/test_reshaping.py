@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from distutils.version import LooseVersion
+
 import unittest
 
 import numpy as np
@@ -22,8 +22,7 @@ import pandas as pd
 
 from pyspark import pandas as ps
 from pyspark.pandas.config import option_context
-
-from pyspark.testing.pandasutils import ComparisonTestBase
+from pyspark.testing.pandasutils import PandasOnSparkTestCase
 from pyspark.testing.sqlutils import SQLTestUtils
 
 
@@ -212,12 +211,8 @@ class FrameReshapingMixin:
             index=np.random.rand(7),
         )
         psdf = ps.from_pandas(pdf)
-        # see also: https://github.com/pandas-dev/pandas/issues/46589
-        if not (LooseVersion("1.4.0") <= LooseVersion(pd.__version__) <= LooseVersion("1.4.2")):
-            self.assert_eq(psdf.nlargest(5, columns="a"), pdf.nlargest(5, columns="a"))
-            self.assert_eq(
-                psdf.nlargest(5, columns=["a", "b"]), pdf.nlargest(5, columns=["a", "b"])
-            )
+        self.assert_eq(psdf.nlargest(5, columns="a"), pdf.nlargest(5, columns="a"))
+        self.assert_eq(psdf.nlargest(5, columns=["a", "b"]), pdf.nlargest(5, columns=["a", "b"]))
         self.assert_eq(psdf.nlargest(5, columns=["c"]), pdf.nlargest(5, columns=["c"]))
         self.assert_eq(
             psdf.nlargest(5, columns=["c"], keep="first"),
@@ -240,12 +235,10 @@ class FrameReshapingMixin:
             index=np.random.rand(7),
         )
         psdf = ps.from_pandas(pdf)
-        # see also: https://github.com/pandas-dev/pandas/issues/46589
-        if not (LooseVersion("1.4.0") <= LooseVersion(pd.__version__) <= LooseVersion("1.4.2")):
-            self.assert_eq(psdf.nsmallest(n=5, columns="a"), pdf.nsmallest(5, columns="a"))
-            self.assert_eq(
-                psdf.nsmallest(n=5, columns=["a", "b"]), pdf.nsmallest(5, columns=["a", "b"])
-            )
+        self.assert_eq(psdf.nsmallest(n=5, columns="a"), pdf.nsmallest(5, columns="a"))
+        self.assert_eq(
+            psdf.nsmallest(n=5, columns=["a", "b"]), pdf.nsmallest(5, columns=["a", "b"])
+        )
         self.assert_eq(psdf.nsmallest(n=5, columns=["c"]), pdf.nsmallest(5, columns=["c"]))
         self.assert_eq(
             psdf.nsmallest(n=5, columns=["c"], keep="first"),
@@ -334,7 +327,7 @@ class FrameReshapingMixin:
         )
 
         self.assert_eq(result1, expected_result1, almost=True)
-        self.assert_eq(result2, expected_result2)
+        self.assert_eq(result2, expected_result2, check_exact=False)
         self.assert_eq(result1.index.name, expected_result1.index.name)
         self.assert_eq(result1.columns.name, expected_result1.columns.name)
         self.assert_eq(result3, expected_result3, almost=True)
@@ -356,7 +349,7 @@ class FrameReshapingMixin:
         )
 
         self.assert_eq(result1, expected_result1, almost=True)
-        self.assert_eq(result2, expected_result2)
+        self.assert_eq(result2, expected_result2, check_exact=False)
         self.assert_eq(result1.index.names, expected_result1.index.names)
         self.assert_eq(result1.columns.name, expected_result1.columns.name)
         self.assert_eq(result3, expected_result3, almost=True)
@@ -374,7 +367,7 @@ class FrameReshapingMixin:
         expected_result3, result3 = pdf.A.explode("Z"), psdf.A.explode("Z")
 
         self.assert_eq(result1, expected_result1, almost=True)
-        self.assert_eq(result2, expected_result2)
+        self.assert_eq(result2, expected_result2, check_exact=False)
         self.assert_eq(result1.index.names, expected_result1.index.names)
         self.assert_eq(result1.columns.names, expected_result1.columns.names)
         self.assert_eq(result3, expected_result3, almost=True)
@@ -471,7 +464,11 @@ class FrameReshapingMixin:
             self.assert_eq(pdf.squeeze(axis), psdf.squeeze(axis))
 
 
-class FrameReshapingTests(FrameReshapingMixin, ComparisonTestBase, SQLTestUtils):
+class FrameReshapingTests(
+    FrameReshapingMixin,
+    PandasOnSparkTestCase,
+    SQLTestUtils,
+):
     pass
 
 

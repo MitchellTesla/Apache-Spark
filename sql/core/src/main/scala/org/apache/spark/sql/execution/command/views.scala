@@ -35,6 +35,7 @@ import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.internal.{SQLConf, StaticSQLConf}
 import org.apache.spark.sql.types.{MetadataBuilder, StructType}
 import org.apache.spark.sql.util.SchemaUtils
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * Create or replace a view with given query plan. This command will generate some view-specific
@@ -146,7 +147,7 @@ case class CreateViewCommand(
         // Handles `CREATE VIEW IF NOT EXISTS v0 AS SELECT ...`. Does nothing when the target view
         // already exists.
       } else if (tableMetadata.tableType != CatalogTableType.VIEW) {
-        throw QueryCompilationErrors.tableIsNotViewError(name, replace)
+        throw QueryCompilationErrors.unsupportedCreateOrReplaceViewOnTableError(name, replace)
       } else if (replace) {
         // Detect cyclic view reference on CREATE OR REPLACE VIEW.
         val viewIdent = tableMetadata.identifier
@@ -154,7 +155,7 @@ case class CreateViewCommand(
 
         // uncache the cached data before replacing an exists view
         logDebug(s"Try to uncache ${viewIdent.quotedString} before replacing.")
-        CommandUtils.uncacheTableOrView(sparkSession, viewIdent.quotedString)
+        CommandUtils.uncacheTableOrView(sparkSession, viewIdent)
 
         // Handles `CREATE OR REPLACE VIEW v0 AS SELECT ...`
         // Nothing we need to retain from the old view, so just drop and create a new one
@@ -167,7 +168,7 @@ case class CreateViewCommand(
       }
     } else {
       // Create the view if it doesn't exist.
-      catalog.createTable(prepareTable(sparkSession, analyzedPlan), ignoreIfExists = false)
+      catalog.createTable(prepareTable(sparkSession, analyzedPlan), ignoreIfExists = allowExisting)
     }
     Seq.empty[Row]
   }
@@ -297,7 +298,7 @@ case class AlterViewAsCommand(
     checkCyclicViewReference(analyzedPlan, Seq(viewIdent), viewIdent)
 
     logDebug(s"Try to uncache ${viewIdent.quotedString} before replacing.")
-    CommandUtils.uncacheTableOrView(session, viewIdent.quotedString)
+    CommandUtils.uncacheTableOrView(session, viewIdent)
 
     val newProperties = generateViewProperties(
       viewMeta.properties, session, analyzedPlan, analyzedPlan.schema.fieldNames)
@@ -359,6 +360,7 @@ object ViewHelper extends SQLConfHelper with Logging {
     "spark.sql.hive.convertMetastoreParquet",
     "spark.sql.hive.convertMetastoreOrc",
     "spark.sql.hive.convertInsertingPartitionedTable",
+    "spark.sql.hive.convertInsertingUnpartitionedTable",
     "spark.sql.hive.convertMetastoreCtas",
     SQLConf.ADDITIONAL_REMOTE_REPOSITORIES.key)
 
@@ -496,14 +498,15 @@ object ViewHelper extends SQLConfHelper with Logging {
 
     // Generate the query column names, throw an AnalysisException if there exists duplicate column
     // names.
-    SchemaUtils.checkColumnNameDuplication(fieldNames, conf.resolver)
+    SchemaUtils.checkColumnNameDuplication(fieldNames.toImmutableArraySeq, conf.resolver)
 
     // Generate the view default catalog and namespace, as well as captured SQL configs.
     val manager = session.sessionState.catalogManager
     removeReferredTempNames(removeSQLConfigs(removeQueryColumnNames(properties))) ++
-      catalogAndNamespaceToProps(manager.currentCatalog.name, manager.currentNamespace) ++
+      catalogAndNamespaceToProps(
+        manager.currentCatalog.name, manager.currentNamespace.toImmutableArraySeq) ++
       sqlConfigsToProps(conf) ++
-      generateQueryColumnNames(queryOutput) ++
+      generateQueryColumnNames(queryOutput.toImmutableArraySeq) ++
       referredTempNamesToProps(tempViewNames, tempFunctionNames, tempVariableNames)
   }
 
@@ -665,7 +668,7 @@ object ViewHelper extends SQLConfHelper with Logging {
         // view is already converted to the underlying tables. So no cyclic views.
         checkCyclicViewReference(analyzedPlan, Seq(name), name)
       }
-      CommandUtils.uncacheTableOrView(session, name.quotedString)
+      CommandUtils.uncacheTableOrView(session, name)
     }
     if (!storeAnalyzedPlanForView) {
       TemporaryViewRelation(

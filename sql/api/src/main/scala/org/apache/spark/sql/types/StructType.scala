@@ -17,19 +17,24 @@
 
 package org.apache.spark.sql.types
 
-import scala.collection.{mutable, Map}
+import java.util.Locale
+
+import scala.collection.{immutable, mutable, Map}
 import scala.util.Try
 import scala.util.control.NonFatal
 
 import org.json4s.JsonDSL._
 
+import org.apache.spark.SparkIllegalArgumentException
 import org.apache.spark.annotation.Stable
 import org.apache.spark.sql.catalyst.analysis.SqlApiAnalysis
 import org.apache.spark.sql.catalyst.parser.{DataTypeParser, LegacyTypeStringParser}
 import org.apache.spark.sql.catalyst.trees.Origin
-import org.apache.spark.sql.catalyst.util.{SparkCollectionUtils, SparkStringUtils, StringConcat}
+import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, SparkStringUtils, StringConcat}
 import org.apache.spark.sql.errors.DataTypeErrors
+import org.apache.spark.sql.errors.DataTypeErrors.toSQLId
 import org.apache.spark.sql.internal.SqlApiConf
+import org.apache.spark.util.SparkCollectionUtils
 
 /**
  * A [[StructType]] object can be constructed by
@@ -115,6 +120,8 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
   private lazy val fieldNamesSet: Set[String] = fieldNames.toSet
   private lazy val nameToField: Map[String, StructField] = fields.map(f => f.name -> f).toMap
   private lazy val nameToIndex: Map[String, Int] = SparkCollectionUtils.toMapWithIndex(fieldNames)
+  private lazy val nameToIndexCaseInsensitive: CaseInsensitiveMap[Int] =
+    CaseInsensitiveMap[Int](nameToIndex.toMap)
 
   override def equals(that: Any): Boolean = {
     that match {
@@ -276,8 +283,11 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
    */
   def apply(name: String): StructField = {
     nameToField.getOrElse(name,
-      throw new IllegalArgumentException(
-        s"$name does not exist. Available: ${fieldNames.mkString(", ")}"))
+      throw new SparkIllegalArgumentException(
+        errorClass = "FIELD_NOT_FOUND",
+        messageParameters = immutable.Map(
+          "fieldName" -> toSQLId(name),
+          "fields" -> fieldNames.map(toSQLId).mkString(", "))))
   }
 
   /**
@@ -289,9 +299,11 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
   def apply(names: Set[String]): StructType = {
     val nonExistFields = names -- fieldNamesSet
     if (nonExistFields.nonEmpty) {
-      throw new IllegalArgumentException(
-        s"${nonExistFields.mkString(", ")} do(es) not exist. " +
-          s"Available: ${fieldNames.mkString(", ")}")
+      throw new SparkIllegalArgumentException(
+        errorClass = "NONEXISTENT_FIELD_NAME_IN_LIST",
+        messageParameters = immutable.Map(
+          "nonExistFields" -> nonExistFields.map(toSQLId).mkString(", "),
+          "fieldNames" -> fieldNames.map(toSQLId).mkString(", ")))
     }
     // Preserve the original order of fields.
     StructType(fields.filter(f => names.contains(f.name)))
@@ -304,12 +316,19 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
    */
   def fieldIndex(name: String): Int = {
     nameToIndex.getOrElse(name,
-      throw new IllegalArgumentException(
-        s"$name does not exist. Available: ${fieldNames.mkString(", ")}"))
+      throw new SparkIllegalArgumentException(
+        errorClass = "FIELD_NOT_FOUND",
+        messageParameters = immutable.Map(
+          "fieldName" -> toSQLId(name),
+          "fields" -> fieldNames.map(toSQLId).mkString(", "))))
   }
 
   private[sql] def getFieldIndex(name: String): Option[Int] = {
     nameToIndex.get(name)
+  }
+
+  private[sql] def getFieldIndexCaseInsensitive(name: String): Option[Int] = {
+    nameToIndexCaseInsensitive.get(name)
   }
 
   /**
@@ -414,7 +433,8 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
   override def defaultSize: Int = fields.map(_.dataType.defaultSize).sum
 
   override def simpleString: String = {
-    val fieldTypes = fields.view.map(field => s"${field.name}:${field.dataType.simpleString}").toSeq
+    val fieldTypes = fields.to(LazyList)
+      .map(field => s"${field.name}:${field.dataType.simpleString}")
     SparkStringUtils.truncatedString(
       fieldTypes,
       "struct<", ",", ">",
@@ -476,8 +496,8 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
    * 4. Otherwise, `this` and `that` are considered as conflicting schemas and an exception would be
    *    thrown.
    */
-  private[sql] def merge(that: StructType): StructType =
-    StructType.merge(this, that).asInstanceOf[StructType]
+  private[sql] def merge(that: StructType, caseSensitive: Boolean = true): StructType =
+    StructType.merge(this, that, caseSensitive).asInstanceOf[StructType]
 
   override private[spark] def asNullable: StructType = {
     val newFields = fields.map {
@@ -487,6 +507,14 @@ case class StructType(fields: Array[StructField]) extends DataType with Seq[Stru
 
     StructType(newFields)
   }
+
+  /**
+   * Returns the same data type but set all nullability fields are true
+   * (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+   *
+   * @since 4.0.0
+   */
+  def toNullable: StructType = asNullable
 
   override private[spark] def existsRecursively(f: (DataType) => Boolean): Boolean = {
     f(this) || fields.exists(field => field.dataType.existsRecursively(f))
@@ -525,7 +553,7 @@ object StructType extends AbstractDataType {
   def apply(fields: Seq[StructField]): StructType = StructType(fields.toArray)
 
   def apply(fields: java.util.List[StructField]): StructType = {
-    import scala.collection.JavaConverters._
+    import scala.jdk.CollectionConverters._
     StructType(fields.asScala.toArray)
   }
 
@@ -549,7 +577,7 @@ object StructType extends AbstractDataType {
     mergeInternal(left, right, (s1: StructType, s2: StructType) => {
       val leftFields = s1.fields
       val rightFields = s2.fields
-      require(leftFields.size == rightFields.size, "To merge nullability, " +
+      require(leftFields.length == rightFields.length, "To merge nullability, " +
         "two structs must have same number of fields.")
 
       val newFields = leftFields.zip(rightFields).map {
@@ -561,16 +589,20 @@ object StructType extends AbstractDataType {
       StructType(newFields)
     })
 
-  private[sql] def merge(left: DataType, right: DataType): DataType =
+  private[sql] def merge(left: DataType, right: DataType, caseSensitive: Boolean = true): DataType =
     mergeInternal(left, right, (s1: StructType, s2: StructType) => {
       val leftFields = s1.fields
       val rightFields = s2.fields
       val newFields = mutable.ArrayBuffer.empty[StructField]
 
-      val rightMapped = fieldsMap(rightFields)
+      def normalize(name: String): String = {
+        if (caseSensitive) name else name.toLowerCase(Locale.ROOT)
+      }
+
+      val rightMapped = fieldsMap(rightFields, caseSensitive)
       leftFields.foreach {
         case leftField @ StructField(leftName, leftType, leftNullable, _) =>
-          rightMapped.get(leftName)
+          rightMapped.get(normalize(leftName))
             .map { case rightField @ StructField(rightName, rightType, rightNullable, _) =>
               try {
                 leftField.copy(
@@ -588,9 +620,9 @@ object StructType extends AbstractDataType {
             .foreach(newFields += _)
       }
 
-      val leftMapped = fieldsMap(leftFields)
+      val leftMapped = fieldsMap(leftFields, caseSensitive)
       rightFields
-        .filterNot(f => leftMapped.get(f.name).nonEmpty)
+        .filterNot(f => leftMapped.contains(normalize(f.name)))
         .foreach { f =>
           newFields += f
         }
@@ -643,11 +675,15 @@ object StructType extends AbstractDataType {
         throw DataTypeErrors.cannotMergeIncompatibleDataTypesError(left, right)
     }
 
-  private[sql] def fieldsMap(fields: Array[StructField]): Map[String, StructField] = {
+  private[sql] def fieldsMap(
+      fields: Array[StructField],
+      caseSensitive: Boolean = true): Map[String, StructField] = {
     // Mimics the optimization of breakOut, not present in Scala 2.13, while working in 2.12
     val map = mutable.Map[String, StructField]()
     map.sizeHint(fields.length)
-    fields.foreach(s => map.put(s.name, s))
+    fields.foreach { s =>
+      if (caseSensitive) map.put(s.name, s) else map.put(s.name.toLowerCase(Locale.ROOT), s)
+    }
     map
   }
 

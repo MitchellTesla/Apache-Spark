@@ -23,22 +23,22 @@ import java.util.{Date, NoSuchElementException, ServiceLoader}
 import java.util.concurrent.{ConcurrentHashMap, ExecutorService, TimeUnit}
 import java.util.zip.ZipOutputStream
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.io.{Codec, Source}
+import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 import scala.xml.Node
 
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
-import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
+import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, SafeModeAction}
 import org.apache.hadoop.hdfs.DistributedFileSystem
-import org.apache.hadoop.hdfs.protocol.HdfsConstants
 import org.apache.hadoop.security.AccessControlException
 
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.PATH
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.History._
 import org.apache.spark.internal.config.Status._
@@ -51,6 +51,7 @@ import org.apache.spark.status.KVUtils._
 import org.apache.spark.status.api.v1.{ApplicationAttemptInfo, ApplicationInfo}
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.{Clock, SystemClock, ThreadUtils, Utils}
+import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.kvstore._
 
 /**
@@ -185,7 +186,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
    */
   private def clearInaccessibleList(expireTimeInSeconds: Long): Unit = {
     val expiredThreshold = clock.getTimeMillis() - expireTimeInSeconds * 1000
-    inaccessibleList.asScala.retain((_, creationTime) => creationTime >= expiredThreshold)
+    inaccessibleList.asScala.filterInPlace((_, creationTime) => creationTime >= expiredThreshold)
   }
 
   private val activeUIs = new mutable.HashMap[(String, Option[String]), LoadedAppUI]()
@@ -204,7 +205,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     if (!Utils.isTesting) {
       ThreadUtils.newDaemonFixedThreadPool(NUM_PROCESSING_THREADS, "log-replay-executor")
     } else {
-      ThreadUtils.sameThreadExecutorService
+      ThreadUtils.sameThreadExecutorService()
     }
   }
 
@@ -317,7 +318,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
    * Split a comma separated String, filter out any empty items, and return a Sequence of strings
    */
   private def stringToSeq(list: String): Seq[String] = {
-    list.split(',').map(_.trim).filter(!_.isEmpty)
+    list.split(',').map(_.trim).filter(_.nonEmpty).toImmutableArraySeq
   }
 
   override def getAppUI(appId: String, attemptId: Option[String]): Option[LoadedAppUI] = {
@@ -381,7 +382,12 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     } else {
       Map()
     }
-    Map("Event log directory" -> logDir) ++ safeMode
+    val driverLog = if (conf.contains(DRIVER_LOG_DFS_DIR)) {
+      Map("Driver log directory" -> conf.get(DRIVER_LOG_DFS_DIR).get)
+    } else {
+      Map()
+    }
+    Map("Event log directory" -> logDir) ++ safeMode ++ driverLog
   }
 
   override def start(): Unit = {
@@ -457,7 +463,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       // right after this check and before the check for stale entities will be identified as stale
       // and will be deleted from the UI until the next 'checkForLogs' run.
       val notStale = mutable.HashSet[String]()
-      val updated = Option(fs.listStatus(new Path(logDir))).map(_.toSeq).getOrElse(Nil)
+      val updated = Option(fs.listStatus(new Path(logDir)))
+        .map(_.toImmutableArraySeq).getOrElse(Nil)
         .filter { entry => isAccessible(entry.getPath) }
         .filter { entry =>
           if (isProcessing(entry.getPath)) {
@@ -859,7 +866,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           try {
             // Fetch the entry first to avoid an RPC when it's already removed.
             listing.read(classOf[LogInfo], inProgressLog)
-            if (!fs.isFile(new Path(inProgressLog))) {
+            if (!SparkHadoopUtil.isFile(fs, new Path(inProgressLog))) {
               listing.synchronized {
                 listing.delete(classOf[LogInfo], inProgressLog)
               }
@@ -914,7 +921,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       case e: AccessControlException =>
         logWarning(s"Insufficient permission while compacting log for $rootPath", e)
       case e: Exception =>
-        logError(s"Exception while compacting log for $rootPath", e)
+        logError(log"Exception while compacting log for ${MDC(PATH, rootPath)}", e)
     } finally {
       endProcessing(rootPath)
     }
@@ -925,11 +932,12 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
    * UI lifecycle.
    */
   private def invalidateUI(appId: String, attemptId: Option[String]): Unit = {
-    synchronized {
-      activeUIs.get((appId, attemptId)).foreach { ui =>
-        ui.invalidate()
-        ui.ui.store.close()
-      }
+    val uiOption = synchronized {
+      activeUIs.get((appId, attemptId))
+    }
+    uiOption.foreach { ui =>
+      ui.invalidate()
+      ui.ui.store.close()
     }
   }
 
@@ -1046,17 +1054,16 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val driverLogFs = new Path(driverLogDir).getFileSystem(hadoopConf)
     val currentTime = clock.getTimeMillis()
     val maxTime = currentTime - conf.get(MAX_DRIVER_LOG_AGE_S) * 1000
-    val logFiles = driverLogFs.listLocatedStatus(new Path(driverLogDir))
-    while (logFiles.hasNext()) {
-      val f = logFiles.next()
+    val logFiles = driverLogFs.listStatus(new Path(driverLogDir))
+    logFiles.foreach { f =>
       // Do not rely on 'modtime' as it is not updated for all filesystems when files are written to
+      val logFileStr = f.getPath.toString
       val deleteFile =
         try {
-          val info = listing.read(classOf[LogInfo], f.getPath().toString())
+          val info = listing.read(classOf[LogInfo], logFileStr)
           // Update the lastprocessedtime of file if it's length or modification time has changed
           if (info.fileSize < f.getLen() || info.lastProcessed < f.getModificationTime()) {
-            listing.write(
-              info.copy(lastProcessed = currentTime, fileSize = f.getLen()))
+            listing.write(info.copy(lastProcessed = currentTime, fileSize = f.getLen))
             false
           } else if (info.lastProcessed > maxTime) {
             false
@@ -1066,13 +1073,13 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         } catch {
           case e: NoSuchElementException =>
             // For every new driver log file discovered, create a new entry in listing
-            listing.write(LogInfo(f.getPath().toString(), currentTime, LogType.DriverLogs, None,
+            listing.write(LogInfo(logFileStr, currentTime, LogType.DriverLogs, None,
               None, f.getLen(), None, None, false))
-          false
+            false
         }
       if (deleteFile) {
-        logInfo(s"Deleting expired driver log for: ${f.getPath().getName()}")
-        listing.delete(classOf[LogInfo], f.getPath().toString())
+        logInfo(s"Deleting expired driver log for: $logFileStr")
+        listing.delete(classOf[LogInfo], logFileStr)
         deleteLog(driverLogFs, f.getPath())
       }
     }
@@ -1158,7 +1165,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
   private[history] def isFsInSafeMode(dfs: DistributedFileSystem): Boolean = {
     /* true to check only for Active NNs status */
-    dfs.setSafeMode(HdfsConstants.SafeModeAction.SAFEMODE_GET, true)
+    dfs.setSafeMode(SafeModeAction.GET, true)
   }
 
   /**
@@ -1225,7 +1232,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     // At this point the disk data either does not exist or was deleted because it failed to
     // load, so the event log needs to be replayed.
 
-    // If the hybrid store is enabled, try it first and fail back to leveldb store.
+    // If the hybrid store is enabled, try it first and fail back to RocksDB store.
     if (hybridStoreEnabled) {
       try {
         return createHybridStore(dm, appId, attempt, metadata)
@@ -1288,7 +1295,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       val diskStore = KVUtils.open(lease.tmpPath, metadata, conf, live = false)
       hybridStore.setDiskStore(diskStore)
       hybridStore.switchToDiskStore(new HybridStore.SwitchToDiskStoreListener {
-        override def onSwitchToDiskStoreSuccess: Unit = {
+        override def onSwitchToDiskStoreSuccess(): Unit = {
           logInfo(s"Completely switched to diskStore for app $appId / ${attempt.info.attemptId}.")
           diskStore.close()
           val newStorePath = lease.commit(appId, attempt.info.attemptId)
@@ -1396,7 +1403,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         case _: AccessControlException =>
           logInfo(s"No permission to delete $log, ignoring.")
         case ioe: IOException =>
-          logError(s"IOException in cleaning $log", ioe)
+          logError(log"IOException in cleaning ${MDC(PATH, log)}", ioe)
       }
     }
     deleted

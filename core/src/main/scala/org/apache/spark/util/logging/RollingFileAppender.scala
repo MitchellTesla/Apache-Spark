@@ -24,7 +24,9 @@ import com.google.common.io.Files
 import org.apache.commons.io.IOUtils
 
 import org.apache.spark.SparkConf
-import org.apache.spark.internal.config
+import org.apache.spark.internal.{config, MDC}
+import org.apache.spark.internal.LogKey.PATH
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * Continuously appends data from input stream into the given file, and rolls
@@ -76,7 +78,7 @@ private[spark] class RollingFileAppender(
       }
     } catch {
       case e: Exception =>
-        logError(s"Error rolling over $activeFile", e)
+        logError(log"Error rolling over ${MDC(PATH, activeFile)}", e)
     }
   }
 
@@ -155,7 +157,8 @@ private[spark] class RollingFileAppender(
       }
     } catch {
       case e: Exception =>
-        logError("Error cleaning logs in directory " + activeFile.getParentFile.getAbsolutePath, e)
+        val path = activeFile.getParentFile.getAbsolutePath
+        logError(log"Error cleaning logs in directory ${MDC(PATH, path)}", e)
     }
   }
 }
@@ -184,6 +187,7 @@ private[spark] object RollingFileAppender {
       val file = new File(directory, activeFileName).getAbsoluteFile
       if (file.exists) Some(file) else None
     }
-    rolledOverFiles.sortBy(_.getName.stripSuffix(GZIP_LOG_SUFFIX)) ++ activeFile
+    (rolledOverFiles.sortBy(_.getName.stripSuffix(GZIP_LOG_SUFFIX)) ++ activeFile)
+      .toImmutableArraySeq
   }
 }

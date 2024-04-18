@@ -123,6 +123,12 @@ if [[ "$1" == "finalize" ]]; then
     --repository-url https://upload.pypi.org/legacy/ \
     "pyspark-$RELEASE_VERSION.tar.gz" \
     "pyspark-$RELEASE_VERSION.tar.gz.asc"
+  svn update "pyspark-connect-$RELEASE_VERSION.tar.gz"
+  svn update "pyspark-connect-$RELEASE_VERSION.tar.gz.asc"
+  TWINE_USERNAME=spark-upload TWINE_PASSWORD="$PYPI_PASSWORD" twine upload \
+    --repository-url https://upload.pypi.org/legacy/ \
+    "pyspark-connect-$RELEASE_VERSION.tar.gz" \
+    "pyspark-connect-$RELEASE_VERSION.tar.gz.asc"
   cd ..
   rm -rf svn-spark
   echo "PySpark uploaded"
@@ -177,7 +183,7 @@ fi
 
 # Depending on the version being built, certain extra profiles need to be activated, and
 # different versions of Scala are supported.
-BASE_PROFILES="-Pmesos -Pyarn -Pkubernetes"
+BASE_PROFILES="-Pyarn -Pkubernetes"
 
 PUBLISH_SCALA_2_13=1
 SCALA_2_13_PROFILES="-Pscala-2.13"
@@ -186,6 +192,9 @@ if [[ $SPARK_VERSION < "3.2" ]]; then
 fi
 
 PUBLISH_SCALA_2_12=1
+if [[ $SPARK_VERSION > "3.5.99" ]]; then
+  PUBLISH_SCALA_2_12=0
+fi
 SCALA_2_12_PROFILES="-Pscala-2.12"
 
 # Hive-specific profiles for some builds
@@ -196,8 +205,12 @@ PUBLISH_PROFILES="$BASE_PROFILES $HIVE_PROFILES -Pspark-ganglia-lgpl -Pkinesis-a
 # Profiles for building binary releases
 BASE_RELEASE_PROFILES="$BASE_PROFILES -Psparkr"
 
-if [[ $JAVA_VERSION < "1.8." ]]; then
+if [[ $JAVA_VERSION < "1.8." ]] && [[ $SPARK_VERSION < "4.0" ]]; then
   echo "Java version $JAVA_VERSION is less than required 1.8 for 2.2+"
+  echo "Please set JAVA_HOME correctly."
+  exit 1
+elif [[ $JAVA_VERSION < "17.0." ]] && [[ $SPARK_VERSION > "3.5.99" ]]; then
+  echo "Java version $JAVA_VERSION is less than required 17 for 4.0+"
   echo "Please set JAVA_HOME correctly."
   exit 1
 fi
@@ -220,7 +233,7 @@ git clean -d -f -x
 rm -f .gitignore
 cd ..
 
-export MAVEN_OPTS="-Xss128m -Xmx12g -XX:ReservedCodeCacheSize=1g"
+export MAVEN_OPTS="-Xss128m -Xmx${MAVEN_MXM_OPT:-12g} -XX:ReservedCodeCacheSize=1g"
 
 if [[ "$1" == "package" ]]; then
   # Source and binary tarballs
@@ -265,12 +278,7 @@ if [[ "$1" == "package" ]]; then
     # Write out the VERSION to PySpark version info we rewrite the - into a . and SNAPSHOT
     # to dev0 to be closer to PEP440.
     PYSPARK_VERSION=`echo "$SPARK_VERSION" |  sed -e "s/-/./" -e "s/SNAPSHOT/dev0/" -e "s/preview/dev/"`
-
-    if [[ $SPARK_VERSION == 3.0* ]] || [[ $SPARK_VERSION == 3.1* ]] || [[ $SPARK_VERSION == 3.2* ]]; then
-      echo "__version__ = '$PYSPARK_VERSION'" > python/pyspark/version.py
-    else
-      echo "__version__: str = '$PYSPARK_VERSION'" > python/pyspark/version.py
-    fi
+    echo "__version__: str = '$PYSPARK_VERSION'" > python/pyspark/version.py
 
     # Get maven home set by MVN
     MVN_HOME=`$MVN -version 2>&1 | grep 'Maven home' | awk '{print $NF}'`
@@ -300,6 +308,14 @@ if [[ "$1" == "package" ]]; then
         --output $PYTHON_DIST_NAME.asc \
         --detach-sig $PYTHON_DIST_NAME
       shasum -a 512 $PYTHON_DIST_NAME > $PYTHON_DIST_NAME.sha512
+
+      PYTHON_CONNECT_DIST_NAME=pyspark-connect-$PYSPARK_VERSION.tar.gz
+      cp spark-$SPARK_VERSION-bin-$NAME/python/dist/$PYTHON_CONNECT_DIST_NAME .
+
+      echo $GPG_PASSPHRASE | $GPG --passphrase-fd 0 --armour \
+        --output $PYTHON_CONNECT_DIST_NAME.asc \
+        --detach-sig $PYTHON_CONNECT_DIST_NAME
+      shasum -a 512 $PYTHON_CONNECT_DIST_NAME > $PYTHON_CONNECT_DIST_NAME.sha512
     fi
 
     echo "Copying and signing regular binary distribution"
@@ -424,10 +440,14 @@ if [[ "$1" == "publish-snapshot" ]]; then
   echo "<password>$ASF_PASSWORD</password>" >> $tmp_settings
   echo "</server></servers></settings>" >> $tmp_settings
 
-  $MVN --settings $tmp_settings -DskipTests $SCALA_2_12_PROFILES $PUBLISH_PROFILES clean deploy
+  if [[ $PUBLISH_SCALA_2_12 = 1 ]]; then
+    $MVN --settings $tmp_settings -DskipTests $SCALA_2_12_PROFILES $PUBLISH_PROFILES clean deploy
+  fi
 
   if [[ $PUBLISH_SCALA_2_13 = 1 ]]; then
-    ./dev/change-scala-version.sh 2.13
+    if [[ $SPARK_VERSION < "4.0" ]]; then
+      ./dev/change-scala-version.sh 2.13
+    fi
     $MVN --settings $tmp_settings -DskipTests $SCALA_2_13_PROFILES $PUBLISH_PROFILES clean deploy
   fi
 
@@ -459,7 +479,9 @@ if [[ "$1" == "publish-release" ]]; then
   tmp_repo=$(mktemp -d spark-repo-XXXXX)
 
   if [[ $PUBLISH_SCALA_2_13 = 1 ]]; then
-    ./dev/change-scala-version.sh 2.13
+    if [[ $SPARK_VERSION < "4.0" ]]; then
+      ./dev/change-scala-version.sh 2.13
+    fi
     $MVN -Dmaven.repo.local=$tmp_repo -DskipTests \
       $SCALA_2_13_PROFILES $PUBLISH_PROFILES clean install
   fi

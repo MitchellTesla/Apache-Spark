@@ -17,7 +17,7 @@
 
 package org.apache.spark.deploy.yarn
 
-import java.io.{FileSystem => _, _}
+import java.io.{File, FileFilter, FileNotFoundException, FileOutputStream, InterruptedIOException, IOException, OutputStreamWriter}
 import java.net.{InetAddress, UnknownHostException, URI, URL}
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
@@ -25,9 +25,9 @@ import java.nio.file.{Files, Paths}
 import java.util.{Collections, Locale, Properties, UUID}
 import java.util.zip.{ZipEntry, ZipOutputStream}
 
-import scala.collection.JavaConverters._
 import scala.collection.immutable.{Map => IMap}
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, ListBuffer, Map}
+import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
 
 import com.google.common.base.Objects
@@ -55,13 +55,14 @@ import org.apache.spark.deploy.security.HadoopDelegationTokenManager
 import org.apache.spark.deploy.yarn.ResourceRequestHelper._
 import org.apache.spark.deploy.yarn.YarnSparkHadoopUtil._
 import org.apache.spark.deploy.yarn.config._
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, LogKey, MDC}
+import org.apache.spark.internal.LogKey.{APP_ID, CONFIG, CONFIG2, PATH}
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.Python._
 import org.apache.spark.launcher.{JavaModuleOptions, LauncherBackend, SparkAppHandle, YarnCommandBuilderUtils}
-import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.rpc.RpcEnv
 import org.apache.spark.util.{CallerContext, Utils, YarnContainerInfoHelper}
+import org.apache.spark.util.ArrayImplicits._
 
 private[spark] class Client(
     val args: ClientArguments,
@@ -75,8 +76,10 @@ private[spark] class Client(
   private val hadoopConf = new YarnConfiguration(SparkHadoopUtil.newConfiguration(sparkConf))
 
   private val isClusterMode = sparkConf.get(SUBMIT_DEPLOY_MODE) == "cluster"
-
   private val isClientUnmanagedAMEnabled = sparkConf.get(YARN_UNMANAGED_AM) && !isClusterMode
+  private val statCachePreloadEnabled = sparkConf.get(YARN_CLIENT_STAT_CACHE_PRELOAD_ENABLED)
+  private val statCachePreloadDirectoryCountThreshold: Int =
+    sparkConf.get(YARN_CLIENT_STAT_CACHE_PRELOAD_PER_DIRECTORY_THRESHOLD)
   private var appMaster: ApplicationMaster = _
   private var stagingDirPath: Path = _
 
@@ -92,12 +95,21 @@ private[spark] class Client(
   } else {
     sparkConf.get(AM_MEMORY).toInt
   }
+
+  private val driverMinimumMemoryOverhead =
+    if (isClusterMode) {
+      sparkConf.get(DRIVER_MIN_MEMORY_OVERHEAD)
+    } else {
+      384L
+    }
+
   private val amMemoryOverhead = {
     val amMemoryOverheadEntry = if (isClusterMode) DRIVER_MEMORY_OVERHEAD else AM_MEMORY_OVERHEAD
     sparkConf.get(amMemoryOverheadEntry).getOrElse(
       math.max((amMemoryOverheadFactor * amMemory).toLong,
-        ResourceProfile.MEMORY_OVERHEAD_MIN_MIB)).toInt
+        driverMinimumMemoryOverhead)).toInt
   }
+
   private val amCores = if (isClusterMode) {
     sparkConf.get(DRIVER_CORES)
   } else {
@@ -110,9 +122,10 @@ private[spark] class Client(
   protected val executorOffHeapMemory = Utils.executorOffHeapMemorySizeAsMb(sparkConf)
 
   private val executorMemoryOvereadFactor = sparkConf.get(EXECUTOR_MEMORY_OVERHEAD_FACTOR)
+  private val minMemoryOverhead = sparkConf.get(EXECUTOR_MIN_MEMORY_OVERHEAD)
   private val executorMemoryOverhead = sparkConf.get(EXECUTOR_MEMORY_OVERHEAD).getOrElse(
     math.max((executorMemoryOvereadFactor * executorMemory).toLong,
-      ResourceProfile.MEMORY_OVERHEAD_MIN_MIB)).toInt
+      minMemoryOverhead)).toInt
 
   private val isPython = sparkConf.get(IS_PYTHON_APP)
   private val pysparkWorkerMemory: Int = if (isPython) {
@@ -245,7 +258,7 @@ private[spark] class Client(
         }
       } catch {
         case ioe: IOException =>
-          logWarning("Failed to cleanup staging dir " + stagingDirPath, ioe)
+          logWarning(log"Failed to cleanup staging dir ${MDC(PATH, stagingDirPath)}", ioe)
       }
     }
 
@@ -319,8 +332,8 @@ private[spark] class Client(
         appContext.setLogAggregationContext(logAggregationContext)
       } catch {
         case NonFatal(e) =>
-          logWarning(s"Ignoring ${ROLLED_LOG_INCLUDE_PATTERN.key} because the version of YARN " +
-            "does not support it", e)
+          logWarning(log"Ignoring ${MDC(CONFIG, ROLLED_LOG_INCLUDE_PATTERN.key)}} " +
+            log"because the version of YARN does not support it", e)
       }
     }
     appContext.setUnmanagedAM(isClientUnmanagedAMEnabled)
@@ -459,6 +472,49 @@ private[spark] class Client(
   }
 
   /**
+   * For each non-local and non-glob resource, we will count its parent directory. If its
+   * frequency is larger than the threshold specified by
+   * spark.yarn.client.statCache.preloaded.perDirectoryThreshold, the corresponding file status
+   * from the directory will be preloaded.
+   *
+   * @param files : the list of files to upload
+   * @return a hashmap contains directories to be preloaded and all file names in that directory
+   */
+  private[yarn] def directoriesToBePreloaded(files: Seq[String]): HashMap[URI, HashSet[String]] = {
+    val directoryToFiles = new HashMap[URI, HashSet[String]]()
+    files.foreach { file =>
+      if (!Utils.isLocalUri(file) && !new GlobPattern(file).hasWildcard) {
+        val currentPath = new Path(Utils.resolveURI(file))
+        val parentUri = currentPath.getParent.toUri
+        directoryToFiles.getOrElseUpdate(parentUri, new HashSet[String]()) += currentPath.getName
+      }
+    }
+    directoryToFiles.filter(_._2.size >= statCachePreloadDirectoryCountThreshold)
+  }
+
+  /**
+   * Preload the statCache with file status. List all files from that directory and add them to the
+   * statCache.
+   *
+   * @param files: the list of files to upload
+   * @param fsLookup: Function for looking up an FS based on a URI; override for testing
+   * @return A preloaded statCache with fileStatus
+   */
+  private[yarn] def getPreloadedStatCache(files: Seq[String],
+      fsLookup: URI => FileSystem = FileSystem.get(_, hadoopConf)): HashMap[URI, FileStatus] = {
+    val statCache = HashMap[URI, FileStatus]()
+    directoriesToBePreloaded(files).foreach { case (dir: URI, filesInDir: HashSet[String]) =>
+      fsLookup(dir).listStatus(new Path(dir), new PathFilter() {
+        override def accept(path: Path): Boolean = filesInDir.contains(path.getName)
+      }).filter(_.isFile()).foreach { fileStatus =>
+        val uri = fileStatus.getPath.toUri
+        statCache.put(uri, fileStatus)
+      }
+    }
+    statCache
+  }
+
+  /**
    * Upload any resources to the distributed cache if needed. If a resource is intended to be
    * consumed locally, set up the appropriate config for downstream code to handle it properly.
    * This is used for setting up a container launch context for our ApplicationMaster.
@@ -485,17 +541,29 @@ private[spark] class Client(
     val localResources = HashMap[String, LocalResource]()
     FileSystem.mkdirs(fs, destDir, new FsPermission(STAGING_DIR_PERMISSION))
 
-    val statCache: Map[URI, FileStatus] = HashMap[URI, FileStatus]()
+    // If preload is enabled, preload the statCache with the files in the directories
+    val statCache = if (statCachePreloadEnabled) {
+      // Consider only following configurations, as they involve the distribution of multiple files
+      val files = sparkConf.get(SPARK_JARS).getOrElse(Nil) ++ sparkConf.get(JARS_TO_DISTRIBUTE) ++
+        sparkConf.get(FILES_TO_DISTRIBUTE) ++ sparkConf.get(ARCHIVES_TO_DISTRIBUTE) ++
+        sparkConf.get(PY_FILES) ++ pySparkArchives
+
+      getPreloadedStatCache(files)
+    } else {
+      HashMap[URI, FileStatus]()
+    }
     val symlinkCache: Map[URI, Path] = HashMap[URI, Path]()
 
     def addDistributedUri(uri: URI): Boolean = {
       val uriStr = uri.toString()
       val fileName = new File(uri.getPath).getName
       if (distributedUris.contains(uriStr)) {
-        logWarning(s"Same path resource $uri added multiple times to distributed cache.")
+        logWarning(log"Same path resource ${MDC(LogKey.URI, uri)} added multiple times " +
+          log"to distributed cache.")
         false
       } else if (distributedNames.contains(fileName)) {
-        logWarning(s"Same name resource $uri added multiple times to distributed cache")
+        logWarning(log"Same name resource ${MDC(LogKey.URI, uri)} added multiple times " +
+          log"to distributed cache")
         false
       } else {
         distributedUris += uriStr
@@ -609,14 +677,18 @@ private[spark] class Client(
             if (!Utils.isLocalUri(jar)) {
               val path = getQualifiedLocalPath(Utils.resolveURI(jar), hadoopConf)
               val pathFs = FileSystem.get(path.toUri(), hadoopConf)
-              val fss = pathFs.globStatus(path)
-              if (fss == null) {
-                throw new FileNotFoundException(s"Path ${path.toString} does not exist")
-              }
-              fss.filter(_.isFile()).foreach { entry =>
-                val uri = entry.getPath().toUri()
-                statCache.update(uri, entry)
-                distribute(uri.toString(), targetDir = Some(LOCALIZED_LIB_DIR))
+              if (statCache.contains(path.toUri)) {
+                distribute(path.toUri.toString, targetDir = Some(LOCALIZED_LIB_DIR))
+              } else {
+                val fss = pathFs.globStatus(path)
+                if (fss == null) {
+                  throw new FileNotFoundException(s"Path ${path.toString} does not exist")
+                }
+                fss.filter(_.isFile()).foreach { entry =>
+                  val uri = entry.getPath().toUri()
+                  statCache.update(uri, entry)
+                  distribute(uri.toString(), targetDir = Some(LOCALIZED_LIB_DIR))
+                }
               }
             } else {
               localJars += jar
@@ -628,8 +700,9 @@ private[spark] class Client(
 
         case None =>
           // No configuration, so fall back to uploading local jar files.
-          logWarning(s"Neither ${SPARK_JARS.key} nor ${SPARK_ARCHIVE.key} is set, falling back " +
-            "to uploading libraries under SPARK_HOME.")
+          logWarning(
+            log"Neither ${MDC(CONFIG, SPARK_JARS.key)} nor ${MDC(CONFIG2, SPARK_ARCHIVE.key)}} " +
+            log"is set, falling back to uploading libraries under SPARK_HOME.")
           val jarsDir = new File(YarnCommandBuilderUtils.findJarsDir(
             sparkConf.getenv("SPARK_HOME")))
           val jarsArchive = File.createTempFile(LOCALIZED_LIB_DIR, ".zip",
@@ -808,7 +881,7 @@ private[spark] class Client(
         if (dir.isDirectory()) {
           val files = dir.listFiles()
           if (files == null) {
-            logWarning("Failed to list files under directory " + dir)
+            logWarning(log"Failed to list files under directory ${MDC(PATH, dir)}")
           } else {
             files.foreach { file =>
               if (file.isFile && !hadoopConfFiles.contains(file.getName())) {
@@ -970,8 +1043,7 @@ private[spark] class Client(
     javaOpts += s"-Djava.net.preferIPv6Addresses=${Utils.preferIPv6}"
 
     // SPARK-37106: To start AM with Java 17, `JavaModuleOptions.defaultModuleOptions`
-    // is added by default. It will not affect Java 8 and Java 11 due to existence of
-    // `-XX:+IgnoreUnrecognizedVMOptions`.
+    // is added by default.
     javaOpts += JavaModuleOptions.defaultModuleOptions()
 
     // Set the environment variable through a command prefix
@@ -998,7 +1070,7 @@ private[spark] class Client(
           sparkConf))
       }
       if (sparkConf.get(AM_JAVA_OPTIONS).isDefined) {
-        logWarning(s"${AM_JAVA_OPTIONS.key} will not take effect in cluster mode")
+        logWarning(log"${MDC(CONFIG, AM_JAVA_OPTIONS.key)} will not take effect in cluster mode")
       }
     } else {
       // Validate and include yarn am specific java options in yarn-client mode.
@@ -1127,10 +1199,10 @@ private[spark] class Client(
       Thread.sleep(interval)
       val report: ApplicationReport =
         try {
-          getApplicationReport
+          getApplicationReport()
         } catch {
           case e: ApplicationNotFoundException =>
-            logError(s"Application $appId not found.")
+            logError(log"Application ${MDC(APP_ID, appId)} not found.")
             cleanupStagingDir()
             return YarnAppReport(YarnApplicationState.KILLED, FinalApplicationStatus.KILLED, None)
           case NonFatal(e) if !e.isInstanceOf[InterruptedIOException] =>
@@ -1275,7 +1347,7 @@ private[spark] class Client(
         .getOrElse(IMap.empty)
     } catch {
       case e: Exception =>
-        logWarning(s"Unable to get driver log links for $appId: $e")
+        logWarning(log"Unable to get driver log links for ${MDC(APP_ID, appId)}: ", e)
         // Include the full stack trace only at DEBUG level to reduce verbosity
         logDebug(s"Unable to get driver log links for $appId", e)
         IMap.empty
@@ -1293,7 +1365,7 @@ private[spark] class Client(
   def run(): Unit = {
     submitApplication()
     if (!launcherBackend.isConnected() && fireAndForget) {
-      val report = getApplicationReport
+      val report = getApplicationReport()
       val state = report.getYarnApplicationState
       logInfo(s"Application report for $appId (state: $state)")
       logInfo(formatReportDetails(report, getDriverLogsLink(report)))
@@ -1319,7 +1391,7 @@ private[spark] class Client(
 
   private def findPySparkArchives(): Seq[String] = {
     sys.env.get("PYSPARK_ARCHIVES_PATH")
-      .map(_.split(",").toSeq)
+      .map(_.split(",").toImmutableArraySeq)
       .getOrElse {
         val pyLibPath = Seq(sys.env("SPARK_HOME"), "python", "lib").mkString(File.separator)
         val pyArchivesFile = new File(pyLibPath, "pyspark.zip")
@@ -1398,21 +1470,21 @@ private[spark] object Client extends Logging {
 
   private def getYarnAppClasspath(conf: Configuration): Seq[String] =
     Option(conf.getStrings(YarnConfiguration.YARN_APPLICATION_CLASSPATH)) match {
-      case Some(s) => s.toSeq
+      case Some(s) => s.toImmutableArraySeq
       case None => getDefaultYarnApplicationClasspath
     }
 
   private def getMRAppClasspath(conf: Configuration): Seq[String] =
     Option(conf.getStrings("mapreduce.application.classpath")) match {
-      case Some(s) => s.toSeq
+      case Some(s) => s.toImmutableArraySeq
       case None => getDefaultMRApplicationClasspath
     }
 
   private[yarn] def getDefaultYarnApplicationClasspath: Seq[String] =
-    YarnConfiguration.DEFAULT_YARN_APPLICATION_CLASSPATH.toSeq
+    YarnConfiguration.DEFAULT_YARN_APPLICATION_CLASSPATH.toImmutableArraySeq
 
   private[yarn] def getDefaultMRApplicationClasspath: Seq[String] =
-    StringUtils.getStrings(MRJobConfig.DEFAULT_MAPREDUCE_APPLICATION_CLASSPATH).toSeq
+    StringUtils.getStrings(MRJobConfig.DEFAULT_MAPREDUCE_APPLICATION_CLASSPATH).toImmutableArraySeq
 
   /**
    * Populate the classpath entry in the given environment map.
@@ -1618,9 +1690,10 @@ private[spark] object Client extends Logging {
       return false
     }
 
-    val srcAuthority = srcUri.getAuthority()
-    val dstAuthority = dstUri.getAuthority()
-    if (srcAuthority != null && !srcAuthority.equalsIgnoreCase(dstAuthority)) {
+    val srcUserInfo = Option(srcUri.getUserInfo).getOrElse("")
+    val dstUserInfo = Option(dstUri.getUserInfo).getOrElse("")
+
+    if (!srcUserInfo.equals(dstUserInfo)) {
       return false
     }
 

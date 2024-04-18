@@ -787,7 +787,7 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
       sqlState = None,
       parameters = Map(
         "sqlExpr" -> "\"regexp_replace(collect_list(1), 1, 2, 1)\"",
-        "paramIndex" -> "1",
+        "paramIndex" -> "first",
         "inputSql" -> "\"collect_list(1)\"",
         "inputType" -> "\"ARRAY<INT>\"",
         "requiredType" -> "\"STRING\""),
@@ -812,7 +812,7 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
     )
     checkError(
       exception = intercept[SparkRuntimeException] {
-        sql("select regexp_extract('', '[a\\\\d]{0, 2}', 1)").collect
+        sql("select regexp_extract('', '[a\\\\d]{0, 2}', 1)").collect()
       },
       errorClass = "INVALID_PARAMETER_VALUE.PATTERN",
       parameters = Map(
@@ -879,7 +879,10 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
         parameters = Map(
           "funcName" -> s"`$funcName`",
           "paramName" -> "`format`",
-          "paramType" -> "\"STRING\""))
+          "paramType" -> "\"STRING\""),
+        context = ExpectedContext(
+          fragment = funcName,
+          callSitePattern = getCurrentClassCallSitePattern))
       checkError(
         exception = intercept[AnalysisException] {
           df2.select(func(col("input"), lit("invalid_format"))).collect()
@@ -888,7 +891,10 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
         parameters = Map(
           "parameter" -> "`format`",
           "functionName" -> s"`$funcName`",
-          "invalidFormat" -> "'invalid_format'"))
+          "invalidFormat" -> "'invalid_format'"),
+        context = ExpectedContext(
+          fragment = funcName,
+          callSitePattern = getCurrentClassCallSitePattern))
       checkError(
         exception = intercept[AnalysisException] {
           sql(s"select $funcName('a', 'b', 'c')")
@@ -900,6 +906,20 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
           "actualNum" -> "3",
           "docroot" -> SPARK_DOC_ROOT),
         context = ExpectedContext("", "", 7, 21 + funcName.length, s"$funcName('a', 'b', 'c')"))
+      checkError(
+        exception = intercept[AnalysisException] {
+          sql(s"select $funcName(x'537061726b2053514c', CAST(NULL AS STRING))")
+        },
+        errorClass = "INVALID_PARAMETER_VALUE.NULL",
+        parameters = Map(
+          "functionName" -> s"`$funcName`",
+          "parameter" -> "`format`"),
+        context = ExpectedContext(
+          "",
+          "",
+          7,
+          51 + funcName.length,
+          s"$funcName(x'537061726b2053514c', CAST(NULL AS STRING))"))
     }
   }
 
@@ -983,6 +1003,11 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
 
     checkAnswer(df.selectExpr("a ilike b escape '/'"), Seq(Row(true)))
     checkAnswer(df.select(ilike(col("a"), col("b"), lit('/'))), Seq(Row(true)))
+
+    val df2 = Seq(("""abc\""", """%\\""")).toDF("i", "p")
+    checkAnswer(df2.select(like(col("i"), col("p"))), Seq(Row(true)))
+    val df3 = Seq(("""\abc""", """\\abc""")).toDF("i", "p")
+    checkAnswer(df3.select(like(col("i"), col("p"))), Seq(Row(true)))
 
     checkError(
       exception = intercept[AnalysisException] {
@@ -1196,6 +1221,11 @@ class StringFunctionsSuite extends QueryTest with SharedSparkSession {
 
     checkAnswer(df.selectExpr("try_to_number(a, '$99.99')"), Seq(Row(78.12)))
     checkAnswer(df.select(try_to_number(col("a"), lit("$99.99"))), Seq(Row(78.12)))
+  }
+
+  test("SPARK-47646: try_to_number should return NULL for malformed input") {
+    val df = spark.createDataset(spark.sparkContext.parallelize(Seq("11")))
+    checkAnswer(df.select(try_to_number($"value", lit("$99.99"))), Seq(Row(null)))
   }
 
   test("SPARK-44905: stateful lastRegex causes NullPointerException on eval for regexp_replace") {

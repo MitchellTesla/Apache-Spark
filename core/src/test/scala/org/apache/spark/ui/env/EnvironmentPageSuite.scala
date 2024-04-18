@@ -17,8 +17,7 @@
 
 package org.apache.spark.ui.env
 
-import javax.servlet.http.HttpServletRequest
-
+import jakarta.servlet.http.HttpServletRequest
 import org.mockito.Mockito._
 
 import org.apache.spark.SparkConf
@@ -43,8 +42,8 @@ class EnvironmentPageSuite extends SparkFunSuite {
     when(info.classpathEntries).thenReturn(Seq.empty)
 
     val store = mock(classOf[AppStatusStore])
-    when(store.environmentInfo).thenReturn(info)
-    when(store.resourceProfileInfo).thenReturn(Seq.empty)
+    when(store.environmentInfo()).thenReturn(info)
+    when(store.resourceProfileInfo()).thenReturn(Seq.empty)
 
     val environmentPage = new EnvironmentPage(environmentTab, new SparkConf, store)
     val request = mock(classOf[HttpServletRequest])

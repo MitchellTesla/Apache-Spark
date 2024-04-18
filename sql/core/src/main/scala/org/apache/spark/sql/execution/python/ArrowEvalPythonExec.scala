@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution.python
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.spark.{JobArtifactSet, TaskContext}
 import org.apache.spark.api.python.ChainedPythonFunctions
@@ -77,7 +77,8 @@ case class ArrowEvalPythonExec(udfs: Seq[PythonUDF], resultAttrs: Seq[Attribute]
       conf.arrowUseLargeVarTypes,
       ArrowPythonRunner.getPythonRunnerConfMap(conf),
       pythonMetrics,
-      jobArtifactUUID)
+      jobArtifactUUID,
+      conf.pythonUDFProfiler)
   }
 
   override protected def withNewChildInternal(newChild: SparkPlan): SparkPlan =
@@ -94,11 +95,12 @@ class ArrowEvalPythonEvaluatorFactory(
     largeVarTypes: Boolean,
     pythonRunnerConf: Map[String, String],
     pythonMetrics: Map[String, SQLMetric],
-    jobArtifactUUID: Option[String])
+    jobArtifactUUID: Option[String],
+    profiler: Option[String])
   extends EvalPythonEvaluatorFactory(childOutput, udfs, output) {
 
   override def evaluate(
-      funcs: Seq[ChainedPythonFunctions],
+      funcs: Seq[(ChainedPythonFunctions, Long)],
       argMetas: Array[Array[ArgumentMetadata]],
       iter: Iterator[InternalRow],
       schema: StructType,
@@ -118,7 +120,8 @@ class ArrowEvalPythonEvaluatorFactory(
       largeVarTypes,
       pythonRunnerConf,
       pythonMetrics,
-      jobArtifactUUID).compute(batchIter, context.partitionId(), context)
+      jobArtifactUUID,
+      profiler).compute(batchIter, context.partitionId(), context)
 
     columnarBatchIter.flatMap { batch =>
       val actualDataTypes = (0 until batch.numCols()).map(i => batch.column(i).dataType())

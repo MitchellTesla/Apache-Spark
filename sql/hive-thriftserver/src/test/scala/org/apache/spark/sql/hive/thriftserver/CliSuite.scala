@@ -19,24 +19,20 @@ package org.apache.spark.sql.hive.thriftserver
 
 import java.io._
 import java.nio.charset.StandardCharsets
-import java.sql.Timestamp
-import java.util.Date
 import java.util.concurrent.CountDownLatch
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Promise
 import scala.concurrent.duration._
+import scala.jdk.CollectionConverters._
 
 import org.apache.hadoop.hive.cli.CliSessionState
-import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.hadoop.hive.ql.session.SessionState
 
 import org.apache.spark.{ErrorMessageFormat, SparkConf, SparkContext, SparkFunSuite}
 import org.apache.spark.ProcessTestUtils.ProcessOutputCapturer
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.sql.execution.datasources.v2.jdbc.JDBCTableCatalog
-import org.apache.spark.sql.hive.HiveUtils
 import org.apache.spark.sql.hive.HiveUtils._
 import org.apache.spark.sql.hive.client.HiveClientImpl
 import org.apache.spark.sql.hive.test.HiveTestJars
@@ -120,7 +116,7 @@ class CliSuite extends SparkFunSuite {
       ""
     }
     val warehouseConf =
-      maybeWarehouse.map(dir => s"--hiveconf ${ConfVars.METASTOREWAREHOUSE}=$dir").getOrElse("")
+      maybeWarehouse.map(dir => s"--hiveconf hive.metastore.warehouse.dir=$dir").getOrElse("")
     val command = {
       val cliScript = "../../bin/spark-sql".split("/").mkString(File.separator)
       val jdbcUrl = s"jdbc:derby:;databaseName=$metastore;create=true"
@@ -130,8 +126,8 @@ class CliSuite extends SparkFunSuite {
          |  $extraHive
          |  --conf spark.ui.enabled=false
          |  --conf ${SQLConf.LEGACY_EMPTY_CURRENT_DB_IN_CLI.key}=true
-         |  --hiveconf ${ConfVars.METASTORECONNECTURLKEY}=$jdbcUrl
-         |  --hiveconf ${ConfVars.SCRATCHDIR}=$scratchDirPath
+         |  --hiveconf javax.jdo.option.ConnectionURL=$jdbcUrl
+         |  --hiveconf hive.exec.scratchdir=$scratchDirPath
          |  --hiveconf conf1=conftest
          |  --hiveconf conf2=1
          |  $warehouseConf
@@ -145,11 +141,8 @@ class CliSuite extends SparkFunSuite {
     val lock = new Object
 
     def captureOutput(source: String)(line: String): Unit = lock.synchronized {
-      // This test suite sometimes gets extremely slow out of unknown reason on Jenkins.  Here we
-      // add a timestamp to provide more diagnosis information.
-      val newLine = s"${new Timestamp(new Date().getTime)} - $source> $line"
-      log.info(newLine)
-      buffer += newLine
+      logInfo(s"$source> $line")
+      buffer += line
 
       if (line.startsWith("Spark master: ") && line.contains("Application Id: ")) {
         foundMasterAndApplicationIdMessage.trySuccess(())
@@ -165,7 +158,7 @@ class CliSuite extends SparkFunSuite {
         }
       } else {
         errorResponses.foreach { r =>
-          if (line.contains(r)) {
+          if (line.contains(r) && !line.contains("IntentionallyFaultyConnectionProvider")) {
             foundAllExpectedAnswers.tryFailure(
               new RuntimeException(s"Failed with error line '$line'"))
           }
@@ -198,7 +191,7 @@ class CliSuite extends SparkFunSuite {
       ThreadUtils.awaitResult(foundAllExpectedAnswers.future, timeoutForQuery)
       log.info("Found all expected output.")
     } catch { case cause: Throwable =>
-      val message =
+      val message = lock.synchronized {
         s"""
            |=======================
            |CliSuite failure output
@@ -212,6 +205,7 @@ class CliSuite extends SparkFunSuite {
            |End CliSuite failure output
            |===========================
          """.stripMargin
+      }
       logError(message, cause)
       fail(message, cause)
     } finally {
@@ -256,7 +250,7 @@ class CliSuite extends SparkFunSuite {
     try {
       runCliWithin(2.minute,
         extraArgs =
-          Seq("--conf", s"spark.hadoop.${ConfVars.METASTOREWAREHOUSE}=$sparkWareHouseDir"),
+          Seq("--conf", s"spark.hadoop.hive.metastore.warehouse.dir=$sparkWareHouseDir"),
         maybeWarehouse = None,
         useExternalHiveFile = true,
         metastore = metastore)(
@@ -267,7 +261,7 @@ class CliSuite extends SparkFunSuite {
 
       // override conf from --hiveconf too
       runCliWithin(2.minute,
-        extraArgs = Seq("--conf", s"spark.${ConfVars.METASTOREWAREHOUSE}=$sparkWareHouseDir"),
+        extraArgs = Seq("--conf", s"spark.hive.metastore.warehouse.dir=$sparkWareHouseDir"),
         metastore = metastore)(
         "desc database default;" -> sparkWareHouseDir.getAbsolutePath,
         "create database cliTestDb;" -> "",
@@ -286,7 +280,7 @@ class CliSuite extends SparkFunSuite {
       runCliWithin(2.minute,
         extraArgs = Seq(
             "--conf", s"${StaticSQLConf.WAREHOUSE_PATH.key}=${sparkWareHouseDir}1",
-            "--conf", s"spark.hadoop.${ConfVars.METASTOREWAREHOUSE}=${sparkWareHouseDir}2"),
+            "--conf", s"spark.hadoop.hive.metastore.warehouse.dir=${sparkWareHouseDir}2"),
         metastore = metastore)(
         "desc database default;" -> sparkWareHouseDir.getAbsolutePath.concat("1"))
     } finally {
@@ -368,7 +362,7 @@ class CliSuite extends SparkFunSuite {
     val hiveContribJar = HiveTestJars.getHiveHcatalogCoreJar().getCanonicalPath
     runCliWithin(
       3.minute,
-      Seq("--conf", s"spark.hadoop.${ConfVars.HIVEAUXJARS}=$hiveContribJar"))(
+      Seq("--conf", s"spark.hadoop.hive.aux.jars.path=$hiveContribJar"))(
       """CREATE TABLE addJarWithHiveAux(key string, val string)
         |ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe';""".stripMargin
         -> "",
@@ -388,7 +382,7 @@ class CliSuite extends SparkFunSuite {
     )
   }
 
-  test("SPARK-11188 Analysis error reporting") {
+  testRetry("SPARK-11188 Analysis error reporting") {
     runCliWithin(timeout = 2.minute,
       errorResponses = Seq("AnalysisException"))(
       "select * from nonexistent_table;" -> "nonexistent_table"
@@ -447,7 +441,7 @@ class CliSuite extends SparkFunSuite {
     val hiveContribJar = HiveTestJars.getHiveContribJar().getCanonicalPath
     runCliWithin(
       1.minute,
-      Seq("--conf", s"spark.hadoop.${ConfVars.HIVEAUXJARS}=$hiveContribJar"))(
+      Seq("--conf", s"spark.hadoop.hive.aux.jars.path=$hiveContribJar"))(
       "CREATE TEMPORARY FUNCTION example_format AS " +
         "'org.apache.hadoop.hive.contrib.udf.example.UDFExampleFormat';" -> "",
       "SELECT example_format('%o', 93);" -> "135"
@@ -471,7 +465,7 @@ class CliSuite extends SparkFunSuite {
     runCliWithin(
       2.minutes,
       Seq("--jars", s"$jarFile", "--conf",
-        s"spark.hadoop.${ConfVars.HIVEAUXJARS}=$hiveContribJar"))(
+        s"spark.hadoop.hive.aux.jars.path=$hiveContribJar"))(
       "CREATE TEMPORARY FUNCTION testjar AS" +
         " 'org.apache.spark.sql.hive.execution.UDTFStack';" -> "",
       "SELECT testjar(1,'TEST-SPARK-TEST-jar', 28840);" -> "TEST-SPARK-TEST-jar\t28840",
@@ -556,7 +550,7 @@ class CliSuite extends SparkFunSuite {
     )
   }
 
-  test("SparkException with root cause will be printStacktrace") {
+  testRetry("SparkException with root cause will be printStacktrace") {
     // If it is not in silent mode, will print the stacktrace
     runCliWithin(
       1.minute,
@@ -580,8 +574,8 @@ class CliSuite extends SparkFunSuite {
     runCliWithin(1.minute)("SELECT MAKE_DATE(-44, 3, 15);" -> "-0044-03-15")
   }
 
-  test("SPARK-33100: Ignore a semicolon inside a bracketed comment in spark-sql") {
-    runCliWithin(4.minute)(
+  testRetry("SPARK-33100: Ignore a semicolon inside a bracketed comment in spark-sql") {
+    runCliWithin(1.minute)(
       "/* SELECT 'test';*/ SELECT 'test';" -> "test",
       ";;/* SELECT 'test';*/ SELECT 'test';" -> "test",
       "/* SELECT 'test';*/;; SELECT 'test';" -> "test",
@@ -628,8 +622,8 @@ class CliSuite extends SparkFunSuite {
     )
   }
 
-  test("SPARK-37555: spark-sql should pass last unclosed comment to backend") {
-    runCliWithin(5.minute)(
+  testRetry("SPARK-37555: spark-sql should pass last unclosed comment to backend") {
+    runCliWithin(1.minute)(
       // Only unclosed comment.
       "/* SELECT /*+ HINT() 4; */;".stripMargin -> "Syntax error at or near ';'",
       // Unclosed nested bracketed comment.
@@ -642,9 +636,10 @@ class CliSuite extends SparkFunSuite {
     )
   }
 
-  test("SPARK-37694: delete [jar|file|archive] shall use spark sql processor") {
+  testRetry("SPARK-37694: delete [jar|file|archive] shall use spark sql processor") {
     runCliWithin(2.minute, errorResponses = Seq("ParseException"))(
-      "delete jar dummy.jar;" -> "Syntax error at or near 'jar': missing 'FROM'.(line 1, pos 7)")
+      "delete jar dummy.jar;" ->
+        "Syntax error at or near 'jar': missing 'FROM'. SQLSTATE: 42601 (line 1, pos 7)")
   }
 
   test("SPARK-37906: Spark SQL CLI should not pass final comment") {
@@ -654,8 +649,7 @@ class CliSuite extends SparkFunSuite {
     val sparkContext = new SparkContext(sparkConf)
     SparkSQLEnv.sparkContext = sparkContext
     val hadoopConf = SparkHadoopUtil.get.newConfiguration(sparkConf)
-    val extraConfigs = HiveUtils.formatTimeVarsForHiveClient(hadoopConf)
-    val cliConf = HiveClientImpl.newHiveConf(sparkConf, hadoopConf, extraConfigs)
+    val cliConf = HiveClientImpl.newHiveConf(sparkConf, hadoopConf)
     val sessionState = new CliSessionState(cliConf)
     SessionState.setCurrentSessionState(sessionState)
     val cli = new SparkSQLCLIDriver
@@ -683,7 +677,7 @@ class CliSuite extends SparkFunSuite {
     SparkSQLEnv.stop()
   }
 
-  test("SPARK-39068: support in-memory catalog and running concurrently") {
+  testRetry("SPARK-39068: support in-memory catalog and running concurrently") {
     val extraConf = Seq("-c", s"${StaticSQLConf.CATALOG_IMPLEMENTATION.key}=in-memory")
     val cd = new CountDownLatch(2)
     def t: Thread = new Thread {
@@ -703,9 +697,10 @@ class CliSuite extends SparkFunSuite {
   }
 
   // scalastyle:off line.size.limit
-  test("formats of error messages") {
+  testRetry("formats of error messages") {
     def check(format: ErrorMessageFormat.Value, errorMessage: String, silent: Boolean): Unit = {
       val expected = errorMessage.split(System.lineSeparator()).map("" -> _)
+      import org.apache.spark.util.ArrayImplicits._
       runCliWithin(
         1.minute,
         extraArgs = Seq(
@@ -713,13 +708,13 @@ class CliSuite extends SparkFunSuite {
           "--conf", s"${SQLConf.ERROR_MESSAGE_FORMAT.key}=$format",
           "--conf", s"${SQLConf.ANSI_ENABLED.key}=true",
           "-e", "select 1 / 0"),
-        errorResponses = Seq("DIVIDE_BY_ZERO"))(expected: _*)
+        errorResponses = Seq("DIVIDE_BY_ZERO"))(expected.toImmutableArraySeq: _*)
     }
     check(
       format = ErrorMessageFormat.PRETTY,
       errorMessage =
         """[DIVIDE_BY_ZERO] Division by zero. Use `try_divide` to tolerate divisor being 0 and return NULL instead. If necessary set "spark.sql.ansi.enabled" to "false" to bypass this error.
-          |== SQL(line 1, position 8) ==
+          |== SQL (line 1, position 8) ==
           |select 1 / 0
           |       ^^^^^
           |""".stripMargin,
@@ -728,7 +723,7 @@ class CliSuite extends SparkFunSuite {
       format = ErrorMessageFormat.PRETTY,
       errorMessage =
         """[DIVIDE_BY_ZERO] Division by zero. Use `try_divide` to tolerate divisor being 0 and return NULL instead. If necessary set "spark.sql.ansi.enabled" to "false" to bypass this error.
-          |== SQL(line 1, position 8) ==
+          |== SQL (line 1, position 8) ==
           |select 1 / 0
           |       ^^^^^
           |
@@ -814,8 +809,7 @@ class CliSuite extends SparkFunSuite {
     val catalogUrl =
       s"spark.sql.catalog.$catalogName.url=jdbc:derby:memory:$catalogName;create=true"
     val catalogDriver =
-      s"spark.sql.catalog.$catalogName.driver=org.apache.derby.jdbc.AutoloadedDriver"
-    val database = s"-database $catalogName.SYS"
+      s"spark.sql.catalog.$catalogName.driver=org.apache.derby.iapi.jdbc.AutoloadedDriver"
     val catalogConfigs =
       Seq(catalogImpl, catalogDriver, catalogUrl, "spark.sql.catalogImplementation=in-memory")
         .flatMap(Seq("--conf", _))

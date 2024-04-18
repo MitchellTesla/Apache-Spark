@@ -31,15 +31,14 @@ from typing import (
     Union,
 )
 
-from py4j.java_gateway import JavaObject, JVMView
-
-from pyspark import copy_func
-from pyspark.context import SparkContext
 from pyspark.errors import PySparkAttributeError, PySparkTypeError, PySparkValueError
+from pyspark.errors.utils import with_origin_to_class
 from pyspark.sql.types import DataType
 from pyspark.sql.utils import get_active_spark_context
 
 if TYPE_CHECKING:
+    from py4j.java_gateway import JavaObject
+    from pyspark.core.context import SparkContext
     from pyspark.sql._typing import ColumnOrName, LiteralType, DecimalLiteral, DateTimeLiteral
     from pyspark.sql.window import WindowSpec
 
@@ -47,16 +46,20 @@ __all__ = ["Column"]
 
 
 def _create_column_from_literal(literal: Union["LiteralType", "DecimalLiteral"]) -> "Column":
+    from py4j.java_gateway import JVMView
+
     sc = get_active_spark_context()
     return cast(JVMView, sc._jvm).functions.lit(literal)
 
 
 def _create_column_from_name(name: str) -> "Column":
+    from py4j.java_gateway import JVMView
+
     sc = get_active_spark_context()
     return cast(JVMView, sc._jvm).functions.col(name)
 
 
-def _to_java_column(col: "ColumnOrName") -> JavaObject:
+def _to_java_column(col: "ColumnOrName") -> "JavaObject":
     if isinstance(col, Column):
         jcol = col._jc
     elif isinstance(col, str):
@@ -69,29 +72,29 @@ def _to_java_column(col: "ColumnOrName") -> JavaObject:
     return jcol
 
 
-def _to_java_expr(col: "ColumnOrName") -> JavaObject:
+def _to_java_expr(col: "ColumnOrName") -> "JavaObject":
     return _to_java_column(col).expr()
 
 
 @overload
-def _to_seq(sc: SparkContext, cols: Iterable[JavaObject]) -> JavaObject:
-    pass
+def _to_seq(sc: "SparkContext", cols: Iterable["JavaObject"]) -> "JavaObject":
+    ...
 
 
 @overload
 def _to_seq(
-    sc: SparkContext,
+    sc: "SparkContext",
     cols: Iterable["ColumnOrName"],
-    converter: Optional[Callable[["ColumnOrName"], JavaObject]],
-) -> JavaObject:
-    pass
+    converter: Optional[Callable[["ColumnOrName"], "JavaObject"]],
+) -> "JavaObject":
+    ...
 
 
 def _to_seq(
-    sc: SparkContext,
-    cols: Union[Iterable["ColumnOrName"], Iterable[JavaObject]],
-    converter: Optional[Callable[["ColumnOrName"], JavaObject]] = None,
-) -> JavaObject:
+    sc: "SparkContext",
+    cols: Union[Iterable["ColumnOrName"], Iterable["JavaObject"]],
+    converter: Optional[Callable[["ColumnOrName"], "JavaObject"]] = None,
+) -> "JavaObject":
     """
     Convert a list of Columns (or names) into a JVM Seq of Column.
 
@@ -105,10 +108,10 @@ def _to_seq(
 
 
 def _to_list(
-    sc: SparkContext,
+    sc: "SparkContext",
     cols: List["ColumnOrName"],
-    converter: Optional[Callable[["ColumnOrName"], JavaObject]] = None,
-) -> JavaObject:
+    converter: Optional[Callable[["ColumnOrName"], "JavaObject"]] = None,
+) -> "JavaObject":
     """
     Convert a list of Columns (or names) into a JVM (Scala) List of Columns.
 
@@ -137,6 +140,8 @@ def _unary_op(
 
 def _func_op(name: str, doc: str = "") -> Callable[["Column"], "Column"]:
     def _(self: "Column") -> "Column":
+        from py4j.java_gateway import JVMView
+
         sc = get_active_spark_context()
         jc = getattr(cast(JVMView, sc._jvm).functions, name)(self._jc)
         return Column(jc)
@@ -151,6 +156,8 @@ def _bin_func_op(
     doc: str = "binary function",
 ) -> Callable[["Column", Union["Column", "LiteralType", "DecimalLiteral"]], "Column"]:
     def _(self: "Column", other: Union["Column", "LiteralType", "DecimalLiteral"]) -> "Column":
+        from py4j.java_gateway import JVMView
+
         sc = get_active_spark_context()
         fn = getattr(cast(JVMView, sc._jvm).functions, name)
         jc = other._jc if isinstance(other, Column) else _create_column_from_literal(other)
@@ -178,6 +185,7 @@ def _bin_op(
         return Column(njc)
 
     _.__doc__ = doc
+    _.__name__ = name
     return _
 
 
@@ -193,9 +201,11 @@ def _reverse_op(
         return Column(jc)
 
     _.__doc__ = doc
+    _.__name__ = name
     return _
 
 
+@with_origin_to_class
 class Column:
 
     """
@@ -227,7 +237,7 @@ class Column:
     Column<...>
     """
 
-    def __init__(self, jc: JavaObject) -> None:
+    def __init__(self, jc: "JavaObject") -> None:
         self._jc = jc
 
     # arithmetic operators
@@ -712,11 +722,11 @@ class Column:
         --------
         >>> df = spark.createDataFrame([('abcedfg', {"key": "value"})], ["l", "d"])
         >>> df.select(df.l[slice(1, 3)], df.d['key']).show()
-        +------------------+------+
-        |substring(l, 1, 3)|d[key]|
-        +------------------+------+
-        |               abc| value|
-        +------------------+------+
+        +---------------+------+
+        |substr(l, 1, 3)|d[key]|
+        +---------------+------+
+        |            abc| value|
+        +---------------+------+
         """
         if isinstance(k, slice):
             if k.step is not None:
@@ -924,10 +934,20 @@ class Column:
 
         Examples
         --------
+
+        Example 1. Using integers for the input arguments.
+
         >>> df = spark.createDataFrame(
         ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
         >>> df.select(df.name.substr(1, 3).alias("col")).collect()
         [Row(col='Ali'), Row(col='Bob')]
+
+        Example 2. Using columns for the input arguments.
+
+        >>> df = spark.createDataFrame(
+        ...      [(3, 4, "Alice"), (2, 3, "Bob")], ["sidx", "eidx", "name"])
+        >>> df.select(df.name.substr(df.sidx, df.eidx).alias("col")).collect()
+        [Row(col='ice'), Row(col='ob')]
         """
         if type(startPos) != type(length):
             raise PySparkTypeError(
@@ -962,8 +982,9 @@ class Column:
 
         Parameters
         ----------
-        cols
-            The result will only be true at a location if any value matches in the Column.
+        cols : Any
+            The values to compare with the column values. The result will only be true at a location
+            if any value matches in the Column.
 
         Returns
         -------
@@ -972,12 +993,35 @@ class Column:
 
         Examples
         --------
-        >>> df = spark.createDataFrame(
-        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
-        >>> df[df.name.isin("Bob", "Mike")].collect()
-        [Row(age=5, name='Bob')]
-        >>> df[df.age.isin([1, 2, 3])].collect()
-        [Row(age=2, name='Alice')]
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob"), (8, "Mike")], ["age", "name"])
+
+        Example 1: Filter rows with names in the specified values
+
+        >>> df[df.name.isin("Bob", "Mike")].show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  5| Bob|
+        |  8|Mike|
+        +---+----+
+
+        Example 2: Filter rows with ages in the specified list
+
+        >>> df[df.age.isin([1, 2, 3])].show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        +---+-----+
+
+        Example 3: Filter rows with names not in the specified values
+
+        >>> df[~df.name.isin("Alice", "Bob")].show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  8|Mike|
+        +---+----+
         """
         if len(cols) == 1 and isinstance(cols[0], (list, set)):
             cols = cast(Tuple, cols[0])
@@ -1119,9 +1163,23 @@ class Column:
     >>> df.filter(df.height.isNotNull()).collect()
     [Row(name='Tom', height=80)]
     """
+    _isNaN_doc = """
+    True if the current expression is NaN.
+
+    .. versionadded:: 4.0.0
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> df = spark.createDataFrame(
+    ...     [Row(name='Tom', height=80.0), Row(name='Alice', height=float('nan'))])
+    >>> df.filter(df.height.isNaN()).collect()
+    [Row(name='Alice', height=nan)]
+    """
 
     isNull = _unary_op("isNull", _isNull_doc)
     isNotNull = _unary_op("isNotNull", _isNotNull_doc)
+    isNaN = _unary_op("isNaN", _isNaN_doc)
 
     def alias(self, *alias: str, **kwargs: Any) -> "Column":
         """
@@ -1175,14 +1233,20 @@ class Column:
             else:
                 return Column(getattr(self._jc, "as")(alias[0]))
         else:
-            if metadata:
+            if metadata is not None:
                 raise PySparkValueError(
                     error_class="ONLY_ALLOWED_FOR_SINGLE_COLUMN",
                     message_parameters={"arg_name": "metadata"},
                 )
             return Column(getattr(self._jc, "as")(_to_seq(sc, list(alias))))
 
-    name = copy_func(alias, sinceversion=2.0, doc=":func:`name` is an alias for :func:`alias`.")
+    def name(self, *alias: str, **kwargs: Any) -> "Column":
+        """
+        :func:`name` is an alias for :func:`alias`.
+
+        .. versionadded:: 2.0.0
+        """
+        return self.alias(*alias, **kwargs)
 
     def cast(self, dataType: Union[DataType, str]) -> "Column":
         """
@@ -1229,7 +1293,75 @@ class Column:
             )
         return Column(jc)
 
-    astype = copy_func(cast, sinceversion=1.4, doc=":func:`astype` is an alias for :func:`cast`.")
+    def try_cast(self, dataType: Union[DataType, str]) -> "Column":
+        """
+        This is a special version of `cast` that performs the same operation, but returns a NULL
+        value instead of raising an error if the invoke method throws exception.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        dataType : :class:`DataType` or str
+            a DataType or Python string literal with a DDL-formatted string
+            to use when parsing the column to the same type.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is cast into new type.
+
+        Examples
+        --------
+        Example 1: Cast with a Datatype
+
+        >>> from pyspark.sql.types import LongType
+        >>> df = spark.createDataFrame(
+        ...      [(2, "123"), (5, "Bob"), (3, None)], ["age", "name"])
+        >>> df.select(df.name.try_cast(LongType())).show()
+        +----+
+        |name|
+        +----+
+        | 123|
+        |NULL|
+        |NULL|
+        +----+
+
+        Example 2: Cast with a DDL string
+
+        >>> df = spark.createDataFrame(
+        ...      [(2, "123"), (5, "Bob"), (3, None)], ["age", "name"])
+        >>> df.select(df.name.try_cast("double")).show()
+        +-----+
+        | name|
+        +-----+
+        |123.0|
+        | NULL|
+        | NULL|
+        +-----+
+        """
+        if isinstance(dataType, str):
+            jc = self._jc.try_cast(dataType)
+        elif isinstance(dataType, DataType):
+            from pyspark.sql import SparkSession
+
+            spark = SparkSession._getActiveSessionOrCreate()
+            jdt = spark._jsparkSession.parseDataType(dataType.json())
+            jc = self._jc.try_cast(jdt)
+        else:
+            raise PySparkTypeError(
+                error_class="NOT_DATATYPE_OR_STR",
+                message_parameters={"arg_name": "dataType", "arg_type": type(dataType).__name__},
+            )
+        return Column(jc)
+
+    def astype(self, dataType: Union[DataType, str]) -> "Column":
+        """
+        :func:`astype` is an alias for :func:`cast`.
+
+        .. versionadded:: 1.4.0
+        """
+        return self.cast(dataType)
 
     def between(
         self,
@@ -1364,16 +1496,50 @@ class Column:
 
         Examples
         --------
+        Example 1: Using :func:`when` with conditions and values to create a new Column
+
         >>> from pyspark.sql import functions as sf
-        >>> df = spark.createDataFrame(
-        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
-        >>> df.select(df.name, sf.when(df.age > 4, 1).when(df.age < 3, -1).otherwise(0)).show()
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> result = df.select(df.name, sf.when(df.age > 4, 1).when(df.age < 3, -1).otherwise(0))
+        >>> result.show()
         +-----+------------------------------------------------------------+
         | name|CASE WHEN (age > 4) THEN 1 WHEN (age < 3) THEN -1 ELSE 0 END|
         +-----+------------------------------------------------------------+
         |Alice|                                                          -1|
         |  Bob|                                                           1|
         +-----+------------------------------------------------------------+
+
+        Example 2: Chaining multiple :func:`when` conditions
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(1, "Alice"), (4, "Bob"), (6, "Charlie")], ["age", "name"])
+        >>> result = df.select(
+        ...     df.name,
+        ...     sf.when(df.age < 3, "Young").when(df.age < 5, "Middle-aged").otherwise("Old")
+        ... )
+        >>> result.show()
+        +-------+---------------------------------------------------------------------------+
+        |   name|CASE WHEN (age < 3) THEN Young WHEN (age < 5) THEN Middle-aged ELSE Old END|
+        +-------+---------------------------------------------------------------------------+
+        |  Alice|                                                                      Young|
+        |    Bob|                                                                Middle-aged|
+        |Charlie|                                                                        Old|
+        +-------+---------------------------------------------------------------------------+
+
+        Example 3: Using literal values as conditions
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> result = df.select(
+        ...     df.name, sf.when(sf.lit(True), 1).otherwise(
+        ...         sf.raise_error("unreachable")).alias("when"))
+        >>> result.show()
+        +-----+----+
+        | name|when|
+        +-----+----+
+        |Alice|   1|
+        |  Bob|   1|
+        +-----+----+
 
         See Also
         --------

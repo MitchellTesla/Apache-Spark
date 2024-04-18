@@ -17,6 +17,7 @@
 package org.apache.spark.sql.catalyst.trees
 
 import org.apache.spark.QueryContext
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * Contexts of TreeNodes, including location, SQL text, object type and object name.
@@ -30,15 +31,22 @@ case class Origin(
     stopIndex: Option[Int] = None,
     sqlText: Option[String] = None,
     objectType: Option[String] = None,
-    objectName: Option[String] = None) {
+    objectName: Option[String] = None,
+    stackTrace: Option[Array[StackTraceElement]] = None,
+    pysparkErrorContext: Option[(String, String)] = None) {
 
-  lazy val context: SQLQueryContext = SQLQueryContext(
-    line, startPosition, startIndex, stopIndex, sqlText, objectType, objectName)
-
-  def getQueryContext: Array[QueryContext] = if (context.isValid) {
-    Array(context)
+  lazy val context: QueryContext = if (stackTrace.isDefined) {
+    DataFrameQueryContext(stackTrace.get.toImmutableArraySeq, pysparkErrorContext)
   } else {
-    Array.empty
+    SQLQueryContext(
+      line, startPosition, startIndex, stopIndex, sqlText, objectType, objectName)
+  }
+
+  def getQueryContext: Array[QueryContext] = {
+    Some(context).filter {
+      case s: SQLQueryContext => s.isValid
+      case _ => true
+    }.toArray
   }
 }
 
@@ -76,4 +84,21 @@ object CurrentOrigin {
     val ret = try f finally { set(previous) }
     ret
   }
+}
+
+/**
+ * Provides detailed error context information on PySpark.
+ */
+object PySparkCurrentOrigin {
+  private val pysparkErrorContext = new ThreadLocal[Option[(String, String)]]() {
+    override def initialValue(): Option[(String, String)] = None
+  }
+
+  def set(fragment: String, callSite: String): Unit = {
+    pysparkErrorContext.set(Some((fragment, callSite)))
+  }
+
+  def get(): Option[(String, String)] = pysparkErrorContext.get()
+
+  def clear(): Unit = pysparkErrorContext.remove()
 }

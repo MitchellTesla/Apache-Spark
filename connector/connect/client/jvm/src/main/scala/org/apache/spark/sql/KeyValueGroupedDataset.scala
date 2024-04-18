@@ -19,7 +19,7 @@ package org.apache.spark.sql
 
 import java.util.Arrays
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 import scala.language.existentials
 
 import org.apache.spark.api.java.function._
@@ -29,7 +29,7 @@ import org.apache.spark.sql.catalyst.encoders.AgnosticEncoders.ProductEncoder
 import org.apache.spark.sql.connect.common.UdfUtils
 import org.apache.spark.sql.expressions.ScalarUserDefinedFunction
 import org.apache.spark.sql.functions.col
-import org.apache.spark.sql.streaming.{GroupState, GroupStateTimeout, OutputMode}
+import org.apache.spark.sql.streaming.{GroupState, GroupStateTimeout, OutputMode, StatefulProcessor, StatefulProcessorWithInitialState, TimeMode}
 
 /**
  * A [[Dataset]] has been logically grouped by a user specified grouping key. Users should not
@@ -111,7 +111,7 @@ class KeyValueGroupedDataset[K, V] private[sql] () extends Serializable {
    *
    * @since 3.5.0
    */
-  def flatMapGroups[U: Encoder](f: (K, Iterator[V]) => TraversableOnce[U]): Dataset[U] = {
+  def flatMapGroups[U: Encoder](f: (K, Iterator[V]) => IterableOnce[U]): Dataset[U] = {
     flatMapSortedGroups()(f)
   }
 
@@ -162,7 +162,7 @@ class KeyValueGroupedDataset[K, V] private[sql] () extends Serializable {
    * @since 3.5.0
    */
   def flatMapSortedGroups[U: Encoder](sortExprs: Column*)(
-      f: (K, Iterator[V]) => TraversableOnce[U]): Dataset[U] = {
+      f: (K, Iterator[V]) => IterableOnce[U]): Dataset[U] = {
     throw new UnsupportedOperationException
   }
 
@@ -194,7 +194,9 @@ class KeyValueGroupedDataset[K, V] private[sql] () extends Serializable {
       SortExprs: Array[Column],
       f: FlatMapGroupsFunction[K, V, U],
       encoder: Encoder[U]): Dataset[U] = {
-    flatMapSortedGroups(SortExprs: _*)(UdfUtils.flatMapGroupsFuncToScalaFunc(f))(encoder)
+    import org.apache.spark.util.ArrayImplicits._
+    flatMapSortedGroups(SortExprs.toImmutableArraySeq: _*)(
+      UdfUtils.flatMapGroupsFuncToScalaFunc(f))(encoder)
   }
 
   /**
@@ -397,7 +399,7 @@ class KeyValueGroupedDataset[K, V] private[sql] () extends Serializable {
    * @since 3.5.0
    */
   def cogroup[U, R: Encoder](other: KeyValueGroupedDataset[K, U])(
-      f: (K, Iterator[V], Iterator[U]) => TraversableOnce[R]): Dataset[R] = {
+      f: (K, Iterator[V], Iterator[U]) => IterableOnce[R]): Dataset[R] = {
     cogroupSorted(other)()()(f)
   }
 
@@ -433,7 +435,7 @@ class KeyValueGroupedDataset[K, V] private[sql] () extends Serializable {
    */
   def cogroupSorted[U, R: Encoder](other: KeyValueGroupedDataset[K, U])(thisSortExprs: Column*)(
       otherSortExprs: Column*)(
-      f: (K, Iterator[V], Iterator[U]) => TraversableOnce[R]): Dataset[R] = {
+      f: (K, Iterator[V], Iterator[U]) => IterableOnce[R]): Dataset[R] = {
     throw new UnsupportedOperationException
   }
 
@@ -458,8 +460,9 @@ class KeyValueGroupedDataset[K, V] private[sql] () extends Serializable {
       otherSortExprs: Array[Column],
       f: CoGroupFunction[K, V, U, R],
       encoder: Encoder[R]): Dataset[R] = {
-    cogroupSorted(other)(thisSortExprs: _*)(otherSortExprs: _*)(
-      UdfUtils.coGroupFunctionToScalaFunc(f))(encoder)
+    import org.apache.spark.util.ArrayImplicits._
+    cogroupSorted(other)(thisSortExprs.toImmutableArraySeq: _*)(
+      otherSortExprs.toImmutableArraySeq: _*)(UdfUtils.coGroupFunctionToScalaFunc(f))(encoder)
   }
 
   protected[sql] def flatMapGroupsWithStateHelper[S: Encoder, U: Encoder](
@@ -811,6 +814,121 @@ class KeyValueGroupedDataset[K, V] private[sql] () extends Serializable {
       stateEncoder,
       outputEncoder)
   }
+
+  /**
+   * (Scala-specific) Invokes methods defined in the stateful processor used in arbitrary state
+   * API v2. We allow the user to act on per-group set of input rows along with keyed state and
+   * the user can choose to output/return 0 or more rows. For a streaming dataframe, we will
+   * repeatedly invoke the interface methods for new rows in each trigger and the user's
+   * state/state variables will be stored persistently across invocations. Currently this operator
+   * is not supported with Spark Connect.
+   *
+   * @tparam U
+   *   The type of the output objects. Must be encodable to Spark SQL types.
+   * @param statefulProcessor
+   *   Instance of statefulProcessor whose functions will be invoked by the operator.
+   * @param timeMode
+   *   The time mode semantics of the stateful processor for timers and TTL.
+   * @param outputMode
+   *   The output mode of the stateful processor.
+   */
+  def transformWithState[U: Encoder](
+      statefulProcessor: StatefulProcessor[K, V, U],
+      timeMode: TimeMode,
+      outputMode: OutputMode): Dataset[U] = {
+    throw new UnsupportedOperationException
+  }
+
+  /**
+   * (Java-specific) Invokes methods defined in the stateful processor used in arbitrary state API
+   * v2. We allow the user to act on per-group set of input rows along with keyed state and the
+   * user can choose to output/return 0 or more rows. For a streaming dataframe, we will
+   * repeatedly invoke the interface methods for new rows in each trigger and the user's
+   * state/state variables will be stored persistently across invocations. Currently this operator
+   * is not supported with Spark Connect.
+   *
+   * @tparam U
+   *   The type of the output objects. Must be encodable to Spark SQL types.
+   * @param statefulProcessor
+   *   Instance of statefulProcessor whose functions will be invoked by the operator.
+   * @param timeMode
+   *   The time mode semantics of the stateful processor for timers and TTL.
+   * @param outputMode
+   *   The output mode of the stateful processor.
+   * @param outputEncoder
+   *   Encoder for the output type.
+   */
+  def transformWithState[U: Encoder](
+      statefulProcessor: StatefulProcessor[K, V, U],
+      timeMode: TimeMode,
+      outputMode: OutputMode,
+      outputEncoder: Encoder[U]): Dataset[U] = {
+    throw new UnsupportedOperationException
+  }
+
+  /**
+   * (Scala-specific) Invokes methods defined in the stateful processor used in arbitrary state
+   * API v2. Functions as the function above, but with additional initial state. Currently this
+   * operator is not supported with Spark Connect.
+   *
+   * @tparam U
+   *   The type of the output objects. Must be encodable to Spark SQL types.
+   * @tparam S
+   *   The type of initial state objects. Must be encodable to Spark SQL types.
+   * @param statefulProcessor
+   *   Instance of statefulProcessor whose functions will be invoked by the operator.
+   * @param timeMode
+   *   The time mode semantics of the stateful processor for timers and TTL.
+   * @param outputMode
+   *   The output mode of the stateful processor.
+   * @param initialState
+   *   User provided initial state that will be used to initiate state for the query in the first
+   *   batch.
+   *
+   * See [[Encoder]] for more details on what types are encodable to Spark SQL.
+   */
+  def transformWithState[U: Encoder, S: Encoder](
+      statefulProcessor: StatefulProcessorWithInitialState[K, V, U, S],
+      timeMode: TimeMode,
+      outputMode: OutputMode,
+      initialState: KeyValueGroupedDataset[K, S]): Dataset[U] = {
+    throw new UnsupportedOperationException
+  }
+
+  /**
+   * (Java-specific) Invokes methods defined in the stateful processor used in arbitrary state API
+   * v2. Functions as the function above, but with additional initial state. Currently this
+   * operator is not supported with Spark Connect.
+   *
+   * @tparam U
+   *   The type of the output objects. Must be encodable to Spark SQL types.
+   * @tparam S
+   *   The type of initial state objects. Must be encodable to Spark SQL types.
+   * @param statefulProcessor
+   *   Instance of statefulProcessor whose functions will be invoked by the operator.
+   * @param timeMode
+   *   The time mode semantics of the stateful processor for timers and TTL.
+   * @param outputMode
+   *   The output mode of the stateful processor.
+   * @param initialState
+   *   User provided initial state that will be used to initiate state for the query in the first
+   *   batch.
+   * @param outputEncoder
+   *   Encoder for the output type.
+   * @param initialStateEncoder
+   *   Encoder for the initial state type.
+   *
+   * See [[Encoder]] for more details on what types are encodable to Spark SQL.
+   */
+  private[sql] def transformWithState[U: Encoder, S: Encoder](
+      statefulProcessor: StatefulProcessorWithInitialState[K, V, U, S],
+      timeMode: TimeMode,
+      outputMode: OutputMode,
+      initialState: KeyValueGroupedDataset[K, S],
+      outputEncoder: Encoder[U],
+      initialStateEncoder: Encoder[S]): Dataset[U] = {
+    throw new UnsupportedOperationException
+  }
 }
 
 /**
@@ -865,7 +983,7 @@ private class KeyValueGroupedDatasetImpl[K, V, IK, IV](
   }
 
   override def flatMapSortedGroups[U: Encoder](sortExprs: Column*)(
-      f: (K, Iterator[V]) => TraversableOnce[U]): Dataset[U] = {
+      f: (K, Iterator[V]) => IterableOnce[U]): Dataset[U] = {
     // Apply mapValues changes to the udf
     val nf =
       if (valueMapFunc == UdfUtils.identical()) f else UdfUtils.mapValuesAdaptor(f, valueMapFunc)
@@ -881,7 +999,7 @@ private class KeyValueGroupedDatasetImpl[K, V, IK, IV](
 
   override def cogroupSorted[U, R: Encoder](other: KeyValueGroupedDataset[K, U])(
       thisSortExprs: Column*)(otherSortExprs: Column*)(
-      f: (K, Iterator[V], Iterator[U]) => TraversableOnce[R]): Dataset[R] = {
+      f: (K, Iterator[V], Iterator[U]) => IterableOnce[R]): Dataset[R] = {
     assert(other.isInstanceOf[KeyValueGroupedDatasetImpl[K, U, _, _]])
     val otherImpl = other.asInstanceOf[KeyValueGroupedDatasetImpl[K, U, _, _]]
     // Apply mapValues changes to the udf

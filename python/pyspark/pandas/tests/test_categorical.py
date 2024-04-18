@@ -15,15 +15,12 @@
 # limitations under the License.
 #
 
-import unittest
-from distutils.version import LooseVersion
-
 import numpy as np
 import pandas as pd
 from pandas.api.types import CategoricalDtype
 
 import pyspark.pandas as ps
-from pyspark.testing.pandasutils import ComparisonTestBase, TestUtils
+from pyspark.testing.pandasutils import PandasOnSparkTestCase, TestUtils
 
 
 class CategoricalTestsMixin:
@@ -37,6 +34,10 @@ class CategoricalTestsMixin:
                 ),
             },
         )
+
+    @property
+    def psdf(self):
+        return ps.from_pandas(self.pdf)
 
     @property
     def df_pair(self):
@@ -184,17 +185,10 @@ class CategoricalTestsMixin:
 
         self.assert_eq(pscser.astype("category"), pcser.astype("category"))
 
-        # CategoricalDtype is not updated if the dtype is same from pandas 1.3.
-        if LooseVersion(pd.__version__) >= LooseVersion("1.3"):
-            self.assert_eq(
-                pscser.astype(CategoricalDtype(["b", "c", "a"])),
-                pcser.astype(CategoricalDtype(["b", "c", "a"])),
-            )
-        else:
-            self.assert_eq(
-                pscser.astype(CategoricalDtype(["b", "c", "a"])),
-                pcser,
-            )
+        self.assert_eq(
+            pscser.astype(CategoricalDtype(["b", "c", "a"])),
+            pcser.astype(CategoricalDtype(["b", "c", "a"])),
+        )
 
         self.assert_eq(pscser.astype(str), pcser.astype(str))
 
@@ -385,28 +379,15 @@ class CategoricalTestsMixin:
         )
 
         dtype = CategoricalDtype(categories=["a", "b", "c", "d"])
-
-        # The behavior for CategoricalDtype is changed from pandas 1.3
-        if LooseVersion(pd.__version__) >= LooseVersion("1.3"):
-            ret_dtype = pdf.b.dtype
-        else:
-            ret_dtype = dtype
+        ret_dtype = pdf.b.dtype
 
         def astype(x) -> ps.Series[ret_dtype]:
             return x.astype(dtype)
 
-        if LooseVersion(pd.__version__) >= LooseVersion("1.2"):
-            self.assert_eq(
-                psdf.groupby("a").transform(astype).sort_values("b").reset_index(drop=True),
-                pdf.groupby("a").transform(astype).sort_values("b").reset_index(drop=True),
-            )
-        else:
-            expected = pdf.groupby("a").transform(astype)
-            expected["b"] = dtype.categories.take(expected["b"].cat.codes).astype(dtype)
-            self.assert_eq(
-                psdf.groupby("a").transform(astype).sort_values("b").reset_index(drop=True),
-                expected.sort_values("b").reset_index(drop=True),
-            )
+        self.assert_eq(
+            psdf.groupby("a").transform(astype).sort_values("b").reset_index(drop=True),
+            pdf.groupby("a").transform(astype).sort_values("b").reset_index(drop=True),
+        )
 
     def test_frame_apply_batch(self):
         pdf, psdf = self.df_pair
@@ -681,7 +662,11 @@ class CategoricalTestsMixin:
         )
 
 
-class CategoricalTests(CategoricalTestsMixin, ComparisonTestBase, TestUtils):
+class CategoricalTests(
+    CategoricalTestsMixin,
+    PandasOnSparkTestCase,
+    TestUtils,
+):
     pass
 
 

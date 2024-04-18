@@ -18,21 +18,27 @@
 import os
 import tempfile
 import unittest
+
 import numpy as np
+
+from pyspark.util import is_remote_only
 from pyspark.sql import SparkSession
 from pyspark.testing.connectutils import should_test_connect, connect_requirement_message
 
 have_torch = True
+torch_requirement_message = None
 try:
     import torch  # noqa: F401
 except ImportError:
     have_torch = False
+    torch_requirement_message = "No torch found"
 
 if should_test_connect:
     from pyspark.ml.connect.classification import (
         LogisticRegression as LORV2,
         LogisticRegressionModel as LORV2Model,
     )
+    import pandas as pd
 
 
 class ClassificationTestsMixin:
@@ -81,7 +87,11 @@ class ClassificationTestsMixin:
 
         result = model.transform(eval_df1).toPandas()
         self._check_result(result, expected_predictions, expected_probabilities)
-        local_transform_result = model.transform(eval_df1.toPandas())
+        pandas_eval_df1 = eval_df1.toPandas()
+        pandas_eval_df1_copy = pandas_eval_df1.copy()
+        local_transform_result = model.transform(pandas_eval_df1)
+        # assert that `transform` doesn't mutate the input dataframe.
+        pd.testing.assert_frame_equal(pandas_eval_df1, pandas_eval_df1_copy)
         self._check_result(local_transform_result, expected_predictions, expected_probabilities)
 
         model.set(model.probabilityCol, "")
@@ -125,7 +135,7 @@ class ClassificationTestsMixin:
         self._check_result(local_transform_result, expected_predictions, expected_probabilities)
 
     def test_save_load(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        with tempfile.TemporaryDirectory(prefix="test_save_load") as tmp_dir:
             estimator = LORV2(maxIter=2, numTrainWorkers=2, learningRate=0.001)
             local_path = os.path.join(tmp_dir, "estimator")
             estimator.saveToLocal(local_path)
@@ -221,7 +231,10 @@ class ClassificationTestsMixin:
 
 
 @unittest.skipIf(
-    not should_test_connect or not have_torch, connect_requirement_message or "No torch found"
+    not should_test_connect or not have_torch or is_remote_only(),
+    connect_requirement_message
+    or torch_requirement_message
+    or "pyspark-connect cannot test classic Spark",
 )
 class ClassificationTests(ClassificationTestsMixin, unittest.TestCase):
     def setUp(self) -> None:

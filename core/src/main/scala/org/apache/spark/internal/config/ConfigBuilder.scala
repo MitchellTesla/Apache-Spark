@@ -22,6 +22,7 @@ import java.util.regex.PatternSyntaxException
 
 import scala.util.matching.Regex
 
+import org.apache.spark.SparkIllegalArgumentException
 import org.apache.spark.network.util.{ByteUnit, JavaUtils}
 import org.apache.spark.util.Utils
 
@@ -55,7 +56,7 @@ private object ConfigHelpers {
 
   def timeFromString(str: String, unit: TimeUnit): Long = JavaUtils.timeStringAs(str, unit)
 
-  def timeToString(v: Long, unit: TimeUnit): String = TimeUnit.MILLISECONDS.convert(v, unit) + "ms"
+  def timeToString(v: Long, unit: TimeUnit): String = s"${TimeUnit.MILLISECONDS.convert(v, unit)}ms"
 
   def byteFromString(str: String, unit: ByteUnit): Long = {
     val (input, multiplier) =
@@ -67,7 +68,7 @@ private object ConfigHelpers {
     multiplier * JavaUtils.byteStringAs(input, unit)
   }
 
-  def byteToString(v: Long, unit: ByteUnit): String = unit.convertTo(v, ByteUnit.BYTE) + "b"
+  def byteToString(v: Long, unit: ByteUnit): String = s"${unit.convertTo(v, ByteUnit.BYTE)}b"
 
   def regexFromString(str: String, key: String): Regex = {
     try str.r catch {
@@ -106,6 +107,24 @@ private[spark] class TypedConfigBuilder[T](
     transform { v =>
       if (!validator(v)) {
         throw new IllegalArgumentException(s"'$v' in ${parent.key} is invalid. $errorMsg")
+      }
+      v
+    }
+  }
+
+  /** Checks if the user-provided value for the config matches the validator.
+   * If it doesn't match, raise Spark's exception with the given error class. */
+  def checkValue(
+      validator: T => Boolean,
+      errorClass: String,
+      parameters: T => Map[String, String]): TypedConfigBuilder[T] = {
+    transform { v =>
+      if (!validator(v)) {
+        throw new SparkIllegalArgumentException(
+          errorClass = "INVALID_CONF_VALUE." + errorClass,
+          messageParameters = parameters(v) ++ Map(
+            "confValue" -> v.toString,
+            "confName" -> parent.key))
       }
       v
     }

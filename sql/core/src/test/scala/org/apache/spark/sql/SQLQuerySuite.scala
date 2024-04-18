@@ -28,7 +28,7 @@ import scala.collection.mutable
 
 import org.apache.commons.io.FileUtils
 
-import org.apache.spark.{AccumulatorSuite, SPARK_DOC_ROOT, SparkException}
+import org.apache.spark.{AccumulatorSuite, SPARK_DOC_ROOT, SparkArithmeticException, SparkDateTimeException, SparkException, SparkNumberFormatException, SparkRuntimeException}
 import org.apache.spark.scheduler.{SparkListener, SparkListenerJobStart}
 import org.apache.spark.sql.catalyst.ExtendedAnalysisException
 import org.apache.spark.sql.catalyst.expressions.{GenericRow, Hex}
@@ -283,7 +283,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
   }
 
   test("SPARK-43522: Fix creating struct column name with index of array") {
-    val df = Seq("a=b,c=d,d=f").toDF.withColumn("key_value", split('value, ","))
+    val df = Seq("a=b,c=d,d=f").toDF().withColumn("key_value", split(Symbol("value"), ","))
       .withColumn("map_entry", transform(col("key_value"), x => struct(split(x, "=")
         .getItem(0), split(x, "=").getItem(1)))).select("map_entry")
 
@@ -1920,7 +1920,10 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
           dfNoCols.select($"b.*")
         },
         errorClass = "CANNOT_RESOLVE_STAR_EXPAND",
-        parameters = Map("targetString" -> "`b`", "columns" -> ""))
+        parameters = Map("targetString" -> "`b`", "columns" -> ""),
+        context = ExpectedContext(
+          fragment = "$",
+          callSitePattern = getCurrentClassCallSitePattern))
     }
   }
 
@@ -2545,7 +2548,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
   test("SPARK-18053: ARRAY equality is broken") {
     withTable("array_tbl") {
       spark.range(10).select(array($"id").as("arr")).write.saveAsTable("array_tbl")
-      assert(sql("SELECT * FROM array_tbl where arr = ARRAY(1L)").count == 1)
+      assert(sql("SELECT * FROM array_tbl where arr = ARRAY(1L)").count() == 1)
     }
   }
 
@@ -2635,10 +2638,14 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
 
   test("SPARK-20164: ExtendedAnalysisException should be tolerant to null query plan") {
     try {
-      throw new ExtendedAnalysisException("", None, None, plan = null)
+      throw new ExtendedAnalysisException(
+        new AnalysisException(
+          errorClass = "_LEGACY_ERROR_USER_RAISED_EXCEPTION",
+          messageParameters = Map("errorMessage" -> "null query plan")),
+        plan = null)
     } catch {
       case ae: ExtendedAnalysisException =>
-        assert(ae.plan == null && ae.getMessage == ae.getSimpleMessage)
+        assert(ae.plan == None && ae.getMessage == ae.getSimpleMessage)
     }
   }
 
@@ -2724,10 +2731,10 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
         parameters = Map(
           "tableOrdinalNumber" -> "second",
           "columnOrdinalNumber" -> "first",
-          "dataType2" -> "\"STRUCT<a: INT>\"",
+          "dataType2" -> "\"STRUCT<a: INT NOT NULL>\"",
           "operator" -> "EXCEPT",
           "hint" -> "",
-          "dataType1" -> "\"STRUCT<A: INT>\""),
+          "dataType1" -> "\"STRUCT<A: INT NOT NULL>\""),
         context = ExpectedContext(
           fragment = "SELECT struct(1 a) EXCEPT (SELECT struct(2 A))",
           start = 0,
@@ -2881,7 +2888,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
     withTable("fact_stats", "dim_stats") {
       val factData = Seq((1, 1, 99, 1), (2, 2, 99, 2), (3, 1, 99, 3), (4, 2, 99, 4))
       val storeData = Seq((1, "BW", "DE"), (2, "AZ", "US"))
-      spark.udf.register("filterND", udf((value: Int) => value > 2).asNondeterministic)
+      spark.udf.register("filterND", udf((value: Int) => value > 2).asNondeterministic())
       factData.toDF("date_id", "store_id", "product_id", "units_sold")
         .write.mode("overwrite").partitionBy("store_id").format("parquet").saveAsTable("fact_stats")
       storeData.toDF("store_id", "state_province", "country")
@@ -2938,14 +2945,14 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
       val distributeExprs = (0 until 100).map(c => s"id$c").mkString(",")
       df.selectExpr(columns : _*).createTempView("spark_25084")
       assert(
-        spark.sql(s"select * from spark_25084 distribute by ($distributeExprs)").count === count)
+        spark.sql(s"select * from spark_25084 distribute by ($distributeExprs)").count() === count)
     }
   }
 
   test("SPARK-25144 'distinct' causes memory leak") {
-    val ds = List(Foo(Some("bar"))).toDS
-    val result = ds.flatMap(_.bar).distinct
-    result.rdd.isEmpty
+    val ds = List(Foo(Some("bar"))).toDS()
+    val result = ds.flatMap(_.bar).distinct()
+    result.rdd.isEmpty()
   }
 
   test("SPARK-25454: decimal division with negative scale") {
@@ -3309,7 +3316,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
         sql("create temporary view t2 as select * from values ('val3a', 110L) as t2(t2a, t2b)")
         val df = sql("SELECT min, min from (SELECT (SELECT min(t2b) FROM t2) min " +
           "FROM t1 WHERE t1a = 'val1c')")
-        assert(df.collect().size == 0)
+        assert(df.collect().length == 0)
       }
     }
   }
@@ -4249,7 +4256,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
 
   test("SPARK-35749: Parse multiple unit fields interval literals as day-time interval types") {
     def evalAsSecond(query: String): Long = {
-      spark.sql(query).map(_.getAs[Duration](0)).collect.head.getSeconds
+      spark.sql(query).map(_.getAs[Duration](0)).collect().head.getSeconds
     }
 
     Seq(
@@ -4272,7 +4279,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
 
   test("SPARK-35749: Parse multiple unit fields interval literals as year-month interval types") {
     def evalAsYearAndMonth(query: String): (Int, Int) = {
-      val result = spark.sql(query).map(_.getAs[Period](0)).collect.head
+      val result = spark.sql(query).map(_.getAs[Period](0)).collect().head
       (result.getYears, result.getMonths)
     }
 
@@ -4459,7 +4466,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
           "select -i - j from t",
           "select i * j from t",
           "select i / (j - 10) from t").foreach { query =>
-          val msg = intercept[SparkException] {
+          val msg = intercept[SparkArithmeticException] {
             sql(query).collect()
           }.getMessage
           assert(msg.contains(query))
@@ -4483,10 +4490,13 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
           "select cast(s as date) from t",
           "select cast(s as timestamp) from t",
           "select cast(s as boolean) from t").foreach { query =>
-          val msg = intercept[SparkException] {
+          val ex = intercept[Exception] {
             sql(query).collect()
-          }.getMessage
-          assert(msg.contains(query))
+          }
+          assert(ex.isInstanceOf[SparkNumberFormatException] ||
+            ex.isInstanceOf[SparkDateTimeException] ||
+            ex.isInstanceOf[SparkRuntimeException])
+          assert(ex.getMessage.contains(query))
         }
       }
     }
@@ -4503,7 +4513,7 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
           "select d / 0.1 from t",
           "select sum(d) from t",
           "select avg(d) from t").foreach { query =>
-          val msg = intercept[SparkException] {
+          val msg = intercept[SparkArithmeticException] {
             sql(query).collect()
           }.getMessage
           assert(msg.contains(query))
@@ -4542,8 +4552,8 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
         .parquet(dir.getCanonicalPath)
       checkAnswer(res,
         Seq(
-          Row(1, false, mutable.WrappedArray.make(binary1)),
-          Row(2, true, mutable.WrappedArray.make(binary2))
+          Row(1, false, mutable.ArraySeq.make(binary1)),
+          Row(2, true, mutable.ArraySeq.make(binary2))
         ))
     }
   }
@@ -4634,9 +4644,9 @@ class SQLQuerySuite extends QueryTest with SharedSparkSession with AdaptiveSpark
     withSQLConf(SQLConf.ANSI_ENABLED.key -> "true") {
       withTable("dt") {
         sql("create table dt using parquet as select 9000000000BD as d")
-        val msg = intercept[SparkException] {
+        val msg = intercept[SparkArithmeticException] {
           sql("select cast(cast(d as int) as long) from dt").collect()
-        }.getCause.getMessage
+        }.getMessage
         assert(msg.contains("[CAST_OVERFLOW]"))
       }
     }

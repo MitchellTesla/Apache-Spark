@@ -20,6 +20,7 @@ package org.apache.spark.util.collection
 import java.io._
 import java.util.Comparator
 
+import scala.collection.BufferedIterator
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
@@ -688,8 +689,6 @@ private[spark] class ExternalSorter[K, V, C](
   /**
    * Write all the data added into this ExternalSorter into a map output writer that pushes bytes
    * to some arbitrary backing store. This is called by the SortShuffleWriter.
-   *
-   * @return array of lengths, in bytes, of each partition of the file (used by map output tracker)
    */
   def writePartitionedMapOutput(
       shuffleId: Int,
@@ -816,7 +815,7 @@ private[spark] class ExternalSorter[K, V, C](
         false
       } else {
         val inMemoryIterator = new WritablePartitionedIterator[K, C](upstream)
-        logInfo(s"Task ${TaskContext.get().taskAttemptId} force spilling in-memory map to disk " +
+        logInfo(s"Task ${TaskContext.get().taskAttemptId()} force spilling in-memory map to disk " +
           s"and it will release ${org.apache.spark.util.Utils.bytesToString(getUsed())} memory")
         val spillFile = spillMemoryIteratorToDisk(inMemoryIterator)
         forceSpillFiles += spillFile
@@ -842,7 +841,7 @@ private[spark] class ExternalSorter[K, V, C](
       }
     }
 
-    override def hasNext(): Boolean = cur != null
+    override def hasNext: Boolean = cur != null
 
     override def next(): ((Int, K), C) = {
       val r = cur

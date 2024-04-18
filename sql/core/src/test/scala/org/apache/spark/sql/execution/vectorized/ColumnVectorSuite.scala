@@ -20,12 +20,13 @@ package org.apache.spark.sql.execution.vectorized
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.catalyst.expressions.SpecificInternalRow
 import org.apache.spark.sql.catalyst.plans.SQLHelper
-import org.apache.spark.sql.execution.columnar.ColumnAccessor
+import org.apache.spark.sql.execution.columnar.{ColumnAccessor, ColumnDictionary}
 import org.apache.spark.sql.execution.columnar.compression.ColumnBuilderHelper
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarArray
 import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.util.ArrayImplicits._
 
 class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   private def withVector(
@@ -397,6 +398,84 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     assert(testVector.getStruct(1).get(1, DoubleType) === 5.67)
   }
 
+  testVectors("SPARK-44805: getInts with dictionary", 3, IntegerType) { testVector =>
+    val dict = new ColumnDictionary(Array[Int](7, 8, 9))
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 0)
+    testVector.getDictionaryIds.putInt(1, 1)
+    testVector.getDictionaryIds.putInt(2, 2)
+
+    assert(testVector.getInts(0, 3)(0) == 7)
+    assert(testVector.getInts(0, 3)(1) == 8)
+    assert(testVector.getInts(0, 3)(2) == 9)
+  }
+
+  testVectors("SPARK-44805: getShorts with dictionary", 3, ShortType) { testVector =>
+    val dict = new ColumnDictionary(Array[Int](7, 8, 9))
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 0)
+    testVector.getDictionaryIds.putInt(1, 1)
+    testVector.getDictionaryIds.putInt(2, 2)
+
+    assert(testVector.getShorts(0, 3)(0) == 7)
+    assert(testVector.getShorts(0, 3)(1) == 8)
+    assert(testVector.getShorts(0, 3)(2) == 9)
+  }
+
+  testVectors("SPARK-44805: getBytes with dictionary", 3, ByteType) { testVector =>
+    val dict = new ColumnDictionary(Array[Int](7, 8, 9))
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 0)
+    testVector.getDictionaryIds.putInt(1, 1)
+    testVector.getDictionaryIds.putInt(2, 2)
+
+    assert(testVector.getBytes(0, 3)(0) == 7)
+    assert(testVector.getBytes(0, 3)(1) == 8)
+    assert(testVector.getBytes(0, 3)(2) == 9)
+  }
+
+  testVectors("SPARK-44805: getLongs with dictionary", 3, LongType) { testVector =>
+    val dict = new ColumnDictionary(Array[Long](2147483648L, 2147483649L, 2147483650L))
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 0)
+    testVector.getDictionaryIds.putInt(1, 1)
+    testVector.getDictionaryIds.putInt(2, 2)
+
+    assert(testVector.getLongs(0, 3)(0) == 2147483648L)
+    assert(testVector.getLongs(0, 3)(1) == 2147483649L)
+    assert(testVector.getLongs(0, 3)(2) == 2147483650L)
+  }
+
+  testVectors("SPARK-44805: getFloats with dictionary", 3, FloatType) { testVector =>
+    val dict = new ColumnDictionary(Array[Float](0.1f, 0.2f, 0.3f))
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 0)
+    testVector.getDictionaryIds.putInt(1, 1)
+    testVector.getDictionaryIds.putInt(2, 2)
+
+    assert(testVector.getFloats(0, 3)(0) == 0.1f)
+    assert(testVector.getFloats(0, 3)(1) == 0.2f)
+    assert(testVector.getFloats(0, 3)(2) == 0.3f)
+  }
+
+  testVectors("SPARK-44805: getDoubles with dictionary", 3, DoubleType) { testVector =>
+    val dict = new ColumnDictionary(Array[Double](1342.17727d, 1342.17728d, 1342.17729d))
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 0)
+    testVector.getDictionaryIds.putInt(1, 1)
+    testVector.getDictionaryIds.putInt(2, 2)
+
+    assert(testVector.getDoubles(0, 3)(0) == 1342.17727d)
+    assert(testVector.getDoubles(0, 3)(1) == 1342.17728d)
+    assert(testVector.getDoubles(0, 3)(2) == 1342.17729d)
+  }
+
   test("[SPARK-22092] off-heap column vector reallocation corrupts array data") {
     withVector(new OffHeapColumnVector(8, arrayType)) { testVector =>
       val data = testVector.arrayData()
@@ -424,7 +503,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   test("CachedBatch boolean Apis") {
     val dataType = BooleanType
     val columnBuilder = ColumnBuilderHelper(dataType, 1024, "col", true)
-    val row = new SpecificInternalRow(Array(dataType))
+    val row = new SpecificInternalRow(Array(dataType).toImmutableArraySeq)
 
     row.setNullAt(0)
     columnBuilder.appendFrom(row, 0)
@@ -434,7 +513,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     }
 
     withVectors(16, dataType) { testVector =>
-      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build)
+      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build())
       ColumnAccessor.decompress(columnAccessor, testVector, 16)
 
       assert(testVector.isNullAt(0))
@@ -448,7 +527,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   test("CachedBatch byte Apis") {
     val dataType = ByteType
     val columnBuilder = ColumnBuilderHelper(dataType, 1024, "col", true)
-    val row = new SpecificInternalRow(Array(dataType))
+    val row = new SpecificInternalRow(Array(dataType).toImmutableArraySeq)
 
     row.setNullAt(0)
     columnBuilder.appendFrom(row, 0)
@@ -458,7 +537,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     }
 
     withVectors(16, dataType) { testVector =>
-      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build)
+      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build())
       ColumnAccessor.decompress(columnAccessor, testVector, 16)
 
       assert(testVector.isNullAt(0))
@@ -472,7 +551,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   test("CachedBatch short Apis") {
     val dataType = ShortType
     val columnBuilder = ColumnBuilderHelper(dataType, 1024, "col", true)
-    val row = new SpecificInternalRow(Array(dataType))
+    val row = new SpecificInternalRow(Array(dataType).toImmutableArraySeq)
 
     row.setNullAt(0)
     columnBuilder.appendFrom(row, 0)
@@ -482,7 +561,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     }
 
     withVectors(16, dataType) { testVector =>
-      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build)
+      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build())
       ColumnAccessor.decompress(columnAccessor, testVector, 16)
 
       assert(testVector.isNullAt(0))
@@ -496,7 +575,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   test("CachedBatch int Apis") {
     val dataType = IntegerType
     val columnBuilder = ColumnBuilderHelper(dataType, 1024, "col", true)
-    val row = new SpecificInternalRow(Array(dataType))
+    val row = new SpecificInternalRow(Array(dataType).toImmutableArraySeq)
 
     row.setNullAt(0)
     columnBuilder.appendFrom(row, 0)
@@ -506,7 +585,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     }
 
     withVectors(16, dataType) { testVector =>
-      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build)
+      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build())
       ColumnAccessor.decompress(columnAccessor, testVector, 16)
 
       assert(testVector.isNullAt(0))
@@ -520,7 +599,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   test("CachedBatch long Apis") {
     Seq(LongType, TimestampType, TimestampNTZType).foreach { dataType =>
       val columnBuilder = ColumnBuilderHelper(dataType, 1024, "col", true)
-      val row = new SpecificInternalRow(Array(dataType))
+      val row = new SpecificInternalRow(Array(dataType).toImmutableArraySeq)
 
       row.setNullAt(0)
       columnBuilder.appendFrom(row, 0)
@@ -530,7 +609,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
       }
 
       withVectors(16, dataType) { testVector =>
-        val columnAccessor = ColumnAccessor(dataType, columnBuilder.build)
+        val columnAccessor = ColumnAccessor(dataType, columnBuilder.build())
         ColumnAccessor.decompress(columnAccessor, testVector, 16)
 
         assert(testVector.isNullAt(0))
@@ -545,7 +624,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   test("CachedBatch float Apis") {
     val dataType = FloatType
     val columnBuilder = ColumnBuilderHelper(dataType, 1024, "col", true)
-    val row = new SpecificInternalRow(Array(dataType))
+    val row = new SpecificInternalRow(Array(dataType).toImmutableArraySeq)
 
     row.setNullAt(0)
     columnBuilder.appendFrom(row, 0)
@@ -555,7 +634,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     }
 
     withVectors(16, dataType) { testVector =>
-      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build)
+      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build())
       ColumnAccessor.decompress(columnAccessor, testVector, 16)
 
       assert(testVector.isNullAt(0))
@@ -569,7 +648,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   test("CachedBatch double Apis") {
     val dataType = DoubleType
     val columnBuilder = ColumnBuilderHelper(dataType, 1024, "col", true)
-    val row = new SpecificInternalRow(Array(dataType))
+    val row = new SpecificInternalRow(Array(dataType).toImmutableArraySeq)
 
     row.setNullAt(0)
     columnBuilder.appendFrom(row, 0)
@@ -579,7 +658,7 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     }
 
     withVectors(16, dataType) { testVector =>
-      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build)
+      val columnAccessor = ColumnAccessor(dataType, columnBuilder.build())
       ColumnAccessor.decompress(columnAccessor, testVector, 16)
 
       assert(testVector.isNullAt(0))

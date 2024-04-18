@@ -42,7 +42,7 @@ private[sql] object QueryParsingErrors extends DataTypeErrorsBase {
 
   def columnAliasInOperationNotAllowedError(op: String, ctx: TableAliasContext): Throwable = {
     new ParseException(
-      errorClass = "COLUMN_ALIASES_IS_NOT_ALLOWED",
+      errorClass = "COLUMN_ALIASES_NOT_ALLOWED",
       messageParameters = Map("op" -> toSQLStmt(op)),
       ctx.identifierList())
   }
@@ -387,6 +387,13 @@ private[sql] object QueryParsingErrors extends DataTypeErrorsBase {
       ctx)
   }
 
+  def invalidStatementError(operation: String, ctx: ParserRuleContext): Throwable = {
+    new ParseException(
+      errorClass = "INVALID_STATEMENT_OR_CLAUSE",
+      messageParameters = Map("operation" -> toSQLStmt(operation)),
+      ctx)
+  }
+
   def descColumnForPartitionUnsupportedError(ctx: DescribeRelationContext): Throwable = {
     new ParseException(
       errorClass = "UNSUPPORTED_FEATURE.DESC_TABLE_COLUMN_PARTITION",
@@ -431,11 +438,15 @@ private[sql] object QueryParsingErrors extends DataTypeErrorsBase {
   }
 
   def sqlStatementUnsupportedError(sqlText: String, position: Origin): Throwable = {
-    new ParseException(Option(sqlText), "Unsupported SQL statement", position, position,
-      Some("_LEGACY_ERROR_TEMP_0039"))
+    new ParseException(
+      command = Option(sqlText),
+      start = position,
+      stop = position,
+      errorClass = "_LEGACY_ERROR_TEMP_0039",
+      messageParameters = Map.empty)
   }
 
-  def invalidIdentifierError(ident: String, ctx: ErrorIdentContext): Throwable = {
+  def invalidIdentifierError(ident: String, ctx: ParserRuleContext): Throwable = {
     new ParseException(
       errorClass = "INVALID_IDENTIFIER",
       messageParameters = Map("ident" -> ident),
@@ -627,6 +638,15 @@ private[sql] object QueryParsingErrors extends DataTypeErrorsBase {
     new ParseException(errorClass = "REF_DEFAULT_VALUE_IS_NOT_ALLOWED_IN_PARTITION", ctx)
   }
 
+  def duplicateArgumentNamesError(
+      arguments: Seq[String],
+      ctx: ParserRuleContext): Throwable = {
+    new ParseException(
+      errorClass = "EXEC_IMMEDIATE_DUPLICATE_ARGUMENT_ALIASES",
+      messageParameters = Map("aliases" -> arguments.map(toSQLId).mkString(", ")),
+      ctx)
+  }
+
   def duplicateTableColumnDescriptor(
       ctx: ParserRuleContext,
       columnName: String,
@@ -678,5 +698,13 @@ private[sql] object QueryParsingErrors extends DataTypeErrorsBase {
         "argumentName" -> toSQLId(argumentName)),
       ctx
     )
+  }
+
+  def clusterByWithPartitionedBy(ctx: ParserRuleContext): Throwable = {
+    new ParseException(errorClass = "SPECIFY_CLUSTER_BY_WITH_PARTITIONED_BY_IS_NOT_ALLOWED", ctx)
+  }
+
+  def clusterByWithBucketing(ctx: ParserRuleContext): Throwable = {
+    new ParseException(errorClass = "SPECIFY_CLUSTER_BY_WITH_BUCKETING_IS_NOT_ALLOWED", ctx)
   }
 }

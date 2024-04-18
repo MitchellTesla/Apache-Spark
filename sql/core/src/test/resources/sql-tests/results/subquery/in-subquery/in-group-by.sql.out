@@ -198,7 +198,7 @@ t1b	8
 
 
 -- !query
-SELECT Count(DISTINCT( * ))
+SELECT Count(DISTINCT * )
 FROM   t1
 WHERE  t1b IN (SELECT Min(t2b)
                FROM   t2
@@ -360,20 +360,128 @@ from t1
 where t1f IN (SELECT RANK() OVER (partition by t3c  order by t2b) as s
                              FROM t2, t3 where t2.t2c = t3.t3c and t2.t2a < t1.t1a)
 -- !query schema
-struct<>
+struct<t1a:string>
 -- !query output
-org.apache.spark.sql.catalyst.ExtendedAnalysisException
-{
-  "errorClass" : "UNSUPPORTED_SUBQUERY_EXPRESSION_CATEGORY.CORRELATED_COLUMN_IS_NOT_ALLOWED_IN_PREDICATE",
-  "sqlState" : "0A000",
-  "messageParameters" : {
-    "treeNode" : "(t2a#x < outer(t1a#x))\nFilter ((t2c#x = t3c#x) AND (t2a#x < outer(t1a#x)))\n+- Join Inner\n   :- SubqueryAlias t2\n   :  +- View (`t2`, [t2a#x,t2b#x,t2c#x,t2d#xL,t2e#x,t2f#x,t2g#x,t2h#x,t2i#x])\n   :     +- Project [cast(t2a#x as string) AS t2a#x, cast(t2b#x as smallint) AS t2b#x, cast(t2c#x as int) AS t2c#x, cast(t2d#xL as bigint) AS t2d#xL, cast(t2e#x as float) AS t2e#x, cast(t2f#x as double) AS t2f#x, cast(t2g#x as decimal(4,0)) AS t2g#x, cast(t2h#x as timestamp) AS t2h#x, cast(t2i#x as date) AS t2i#x]\n   :        +- Project [t2a#x, t2b#x, t2c#x, t2d#xL, t2e#x, t2f#x, t2g#x, t2h#x, t2i#x]\n   :           +- SubqueryAlias t2\n   :              +- LocalRelation [t2a#x, t2b#x, t2c#x, t2d#xL, t2e#x, t2f#x, t2g#x, t2h#x, t2i#x]\n   +- SubqueryAlias t3\n      +- View (`t3`, [t3a#x,t3b#x,t3c#x,t3d#xL,t3e#x,t3f#x,t3g#x,t3h#x,t3i#x])\n         +- Project [cast(t3a#x as string) AS t3a#x, cast(t3b#x as smallint) AS t3b#x, cast(t3c#x as int) AS t3c#x, cast(t3d#xL as bigint) AS t3d#xL, cast(t3e#x as float) AS t3e#x, cast(t3f#x as double) AS t3f#x, cast(t3g#x as decimal(4,0)) AS t3g#x, cast(t3h#x as timestamp) AS t3h#x, cast(t3i#x as date) AS t3i#x]\n            +- Project [t3a#x, t3b#x, t3c#x, t3d#xL, t3e#x, t3f#x, t3g#x, t3h#x, t3i#x]\n               +- SubqueryAlias t3\n                  +- LocalRelation [t3a#x, t3b#x, t3c#x, t3d#xL, t3e#x, t3f#x, t3g#x, t3h#x, t3i#x]\n"
-  },
-  "queryContext" : [ {
-    "objectType" : "",
-    "objectName" : "",
-    "startIndex" : 34,
-    "stopIndex" : 172,
-    "fragment" : "SELECT RANK() OVER (partition by t3c  order by t2b) as s\n                             FROM t2, t3 where t2.t2c = t3.t3c and t2.t2a < t1.t1a"
-  } ]
-}
+t1d
+t1d
+t1d
+t1e
+t1e
+t1e
+
+
+-- !query
+SELECT
+  t1.t1a,
+  t1.t1a IN (SELECT t2a FROM t2) as v1
+FROM t1
+GROUP BY t1.t1a ORDER BY t1.t1a
+-- !query schema
+struct<t1a:string,v1:boolean>
+-- !query output
+t1a	false
+t1b	true
+t1c	true
+t1d	false
+t1e	true
+
+
+-- !query
+SELECT
+  count(cast(t1.t1a IN (SELECT t2a FROM t2) as INT)),
+  sum(cast(t1.t1b NOT IN (SELECT t2b FROM t2) as INT))
+FROM t1
+-- !query schema
+struct<count(CAST((t1a IN (listquery())) AS INT)):bigint,sum(CAST((NOT (t1b IN (listquery()))) AS INT)):bigint>
+-- !query output
+12	0
+
+
+-- !query
+SELECT
+    agg_results.t1a,
+    COUNT(*)
+    FROM (SELECT t1.t1a FROM t1 WHERE t1.t1a IN (SELECT t2a FROM t2)) AS agg_results
+GROUP BY agg_results.t1a ORDER BY agg_results.t1a
+-- !query schema
+struct<t1a:string,count(1):bigint>
+-- !query output
+t1b	1
+t1c	1
+t1e	3
+
+
+-- !query
+SELECT
+  t1.t1a,
+  CASE
+    WHEN t1.t1a IN (SELECT t2a FROM t2) THEN 10
+    ELSE -10
+  END AS v1
+FROM t1
+GROUP BY t1.t1a
+ORDER BY t1.t1a
+-- !query schema
+struct<t1a:string,v1:int>
+-- !query output
+t1a	-10
+t1b	10
+t1c	10
+t1d	-10
+t1e	10
+
+
+-- !query
+SELECT
+  t1.t1c,
+  SUM(CASE
+    WHEN t1.t1c IN (SELECT t2c FROM t2) THEN 10
+    ELSE -10
+  END) AS v1,
+  SUM(CASE
+      WHEN t1.t1d IN (SELECT t2c FROM t2) THEN 10
+      ELSE -10
+    END) AS v2,
+  t1.t1c + 10 IN (SELECT t2c + 2 FROM t2) AS v3,
+  count(t1.t1c) as ct,
+  count(t1.t1d)
+FROM t1
+GROUP BY t1.t1c
+ORDER BY t1.t1c
+-- !query schema
+struct<t1c:int,v1:bigint,v2:bigint,v3:boolean,ct:bigint,count(t1d):bigint>
+-- !query output
+NULL	-40	-20	false	0	4
+8	-20	-20	true	2	2
+12	20	-20	false	2	2
+16	40	-40	false	4	4
+
+
+-- !query
+SELECT
+  SUM(CASE
+    WHEN t1.t1c IN (SELECT t2c FROM t2) THEN 10
+    ELSE -10
+  END) AS v1,
+  count(t1.t1c) as ct
+FROM t1
+-- !query schema
+struct<v1:bigint,ct:bigint>
+-- !query output
+0	8
+
+
+-- !query
+SELECT
+    cast(t1a in (select t2a from t2) as int) + 1 as groupExpr,
+    sum(cast(t1a in (select t2a from t2) as int) + 1) as aggExpr,
+    cast(t1a in (select t2a from t2) as int) + 1 + cast(exists (select t2a from t2) as int)
+        as complexExpr
+FROM t1
+GROUP BY
+    cast(t1a in (select t2a from t2) as int) + 1
+-- !query schema
+struct<groupExpr:int,aggExpr:bigint,complexExpr:int>
+-- !query output
+1	7	2
+2	10	3

@@ -15,31 +15,15 @@
 # limitations under the License.
 #
 import unittest
-from distutils.version import LooseVersion
 
 import pandas as pd
 
 from pyspark import pandas as ps
-from pyspark.testing.pandasutils import ComparisonTestBase
+from pyspark.testing.pandasutils import PandasOnSparkTestCase
 from pyspark.testing.sqlutils import SQLTestUtils
 
 
 class GroupbyAggregateMixin:
-    @property
-    def pdf(self):
-        return pd.DataFrame(
-            {
-                "A": [1, 2, 1, 2],
-                "B": [3.1, 4.1, 4.1, 3.1],
-                "C": ["a", "b", "b", "a"],
-                "D": [True, False, False, True],
-            }
-        )
-
-    @property
-    def psdf(self):
-        return ps.from_pandas(self.pdf)
-
     def test_aggregate(self):
         pdf = pd.DataFrame(
             {"A": [1, 1, 2, 2], "B": [1, 2, 3, 4], "C": [0.362, 0.227, 1.267, -0.562]}
@@ -186,7 +170,6 @@ class GroupbyAggregateMixin:
 
         agg_funcs = ["max", "min", ["min", "max"]]
         for aggfunc in agg_funcs:
-
             # Since in Koalas groupby, the order of rows might be different
             # so sort on index to ensure they have same output
             sorted_agg_psdf = psdf.groupby("kind").agg(aggfunc).sort_index()
@@ -287,7 +270,11 @@ class GroupbyAggregateMixin:
         self.assert_eq(agg_pdf, agg_psdf)
 
 
-class GroupbyAggregateTests(GroupbyAggregateMixin, ComparisonTestBase, SQLTestUtils):
+class GroupbyAggregateTests(
+    GroupbyAggregateMixin,
+    PandasOnSparkTestCase,
+    SQLTestUtils,
+):
     pass
 
 

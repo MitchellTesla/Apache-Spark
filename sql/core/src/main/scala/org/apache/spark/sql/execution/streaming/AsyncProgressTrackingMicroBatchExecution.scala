@@ -50,8 +50,6 @@ class AsyncProgressTrackingMicroBatchExecution(
   // to cache the batch id of the last batch written to storage
   private val lastBatchPersistedToDurableStorage = new AtomicLong(-1)
 
-  override val triggerExecutor: TriggerExecutor = validateAndGetTrigger()
-
   // used to check during the first batch if the pipeline is stateful
   private var isFirstBatch: Boolean = true
 
@@ -94,6 +92,9 @@ class AsyncProgressTrackingMicroBatchExecution(
   override val commitLog =
     new AsyncCommitLog(sparkSession, checkpointFile("commits"), asyncWritesExecutorService)
 
+  // perform quick validation to fail faster
+  validateAndGetTrigger()
+
   override def validateOffsetLogAndGetPrevOffset(latestBatchId: Long): Option[OffsetSeq] = {
     /* Initialize committed offsets to a committed batch, which at this
      * is the second latest batch id in the offset log.
@@ -109,12 +110,12 @@ class AsyncProgressTrackingMicroBatchExecution(
     }
   }
 
-  override def markMicroBatchExecutionStart(): Unit = {
+  override def markMicroBatchExecutionStart(execCtx: MicroBatchExecutionContext): Unit = {
     // check if streaming query is stateful
     checkNotStatefulStreamingQuery
   }
 
-  override def cleanUpLastExecutedMicroBatch(): Unit = {
+  override def cleanUpLastExecutedMicroBatch(execCtx: MicroBatchExecutionContext): Unit = {
     // this is a no op for async progress tracking since we only want to commit sources only
     // after the offset WAL commit has be successfully written
   }
@@ -123,11 +124,11 @@ class AsyncProgressTrackingMicroBatchExecution(
    * Should not call super method as we need to do something completely different
    * in this method for async progress tracking
    */
-  override def markMicroBatchStart(): Unit = {
+  override def markMicroBatchStart(execCtx: MicroBatchExecutionContext): Unit = {
     // Because we are using a thread pool with only one thread, async writes to the offset log
     // are still written in a serial / in order fashion
     offsetLog
-      .addAsync(currentBatchId, availableOffsets.toOffsetSeq(sources, offsetSeqMetadata))
+      .addAsync(execCtx.batchId, execCtx.endOffsets.toOffsetSeq(sources, execCtx.offsetSeqMetadata))
       .thenAccept(tuple => {
         val (batchId, persistedToDurableStorage) = tuple
         if (persistedToDurableStorage) {
@@ -156,7 +157,7 @@ class AsyncProgressTrackingMicroBatchExecution(
       })
       .exceptionally((th: Throwable) => {
         logError(s"Encountered error while performing" +
-          s" async offset write for batch ${currentBatchId}", th)
+          s" async offset write for batch ${execCtx.batchId}", th)
         errorNotifier.markError(th)
         return
       })
@@ -169,9 +170,9 @@ class AsyncProgressTrackingMicroBatchExecution(
     }
   }
 
-  override def markMicroBatchEnd(): Unit = {
-    watermarkTracker.updateWatermark(lastExecution.executedPlan)
-    reportTimeTaken("commitOffsets") {
+  override def markMicroBatchEnd(execCtx: MicroBatchExecutionContext): Unit = {
+    watermarkTracker.updateWatermark(execCtx.executionPlan.executedPlan)
+    execCtx.reportTimeTaken("commitOffsets") {
       // check if current batch there is a async write for the offset log is issued for this batch
       // if so, we should do the same for commit log.  However, if this is the first batch executed
       // in this run we should always persist to the commit log.  There can be situations in which
@@ -180,27 +181,27 @@ class AsyncProgressTrackingMicroBatchExecution(
       // and the commit log is 0, 2.  On restart we will re-process the data from batch 3 -> 5.
       // Batch 5 is already part of the offset log but we still need to write the entry to
       // the commit log
-      if (offsetLog.getAsyncOffsetWrite(currentBatchId).nonEmpty
+      if (offsetLog.getAsyncOffsetWrite(execCtx.batchId).nonEmpty
         || isFirstBatch) {
         isFirstBatch = false
 
         commitLog
-          .addAsync(currentBatchId, CommitMetadata(watermarkTracker.currentWatermark))
+          .addAsync(execCtx.batchId, CommitMetadata(watermarkTracker.currentWatermark))
           .exceptionally((th: Throwable) => {
             logError(s"Got exception during async write to commit log" +
-              s" for batch ${currentBatchId}", th)
+              s" for batch ${execCtx.batchId}", th)
             errorNotifier.markError(th)
             return
           })
       } else {
         if (!commitLog.addInMemory(
-          currentBatchId, CommitMetadata(watermarkTracker.currentWatermark))) {
-          throw QueryExecutionErrors.concurrentStreamLogUpdate(currentBatchId)
+          execCtx.batchId, CommitMetadata(watermarkTracker.currentWatermark))) {
+          throw QueryExecutionErrors.concurrentStreamLogUpdate(execCtx.batchId)
         }
       }
-      offsetLog.removeAsyncOffsetWrite(currentBatchId)
+      offsetLog.removeAsyncOffsetWrite(execCtx.batchId)
     }
-    committedOffsets ++= availableOffsets
+    committedOffsets ++= execCtx.endOffsets
   }
 
   // need to look at the number of files on disk
@@ -227,6 +228,8 @@ class AsyncProgressTrackingMicroBatchExecution(
   def areWritesPendingOrInProgress(): Boolean = {
     asyncWritesExecutorService.getQueue.size() > 0 || asyncWritesExecutorService.getActiveCount > 0
   }
+
+  override protected def getTrigger(): TriggerExecutor = validateAndGetTrigger()
 
   private def validateAndGetTrigger(): TriggerExecutor = {
     // validate that the pipeline is using a supported sink

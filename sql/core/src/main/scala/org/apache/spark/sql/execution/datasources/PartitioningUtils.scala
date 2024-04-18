@@ -40,6 +40,7 @@ import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.SchemaUtils
 import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.util.ArrayImplicits._
 
 // TODO: We should tighten up visibility of the classes here once we clean up Hive coupling.
 
@@ -343,7 +344,7 @@ object PartitioningUtils extends SQLConfHelper {
     pathFragment.split("/").map { kv =>
       val pair = kv.split("=", 2)
       (unescapePathName(pair(0)), unescapePathName(pair(1)))
-    }
+    }.toImmutableArraySeq
   }
 
   /**
@@ -406,7 +407,7 @@ object PartitioningUtils extends SQLConfHelper {
     val distinctPartColNames = pathWithPartitionValues.map(_._2.columnNames).distinct
 
     def groupByKey[K, V](seq: Seq[(K, V)]): Map[K, Iterable[V]] =
-      seq.groupBy { case (key, _) => key }.mapValues(_.map { case (_, value) => value }).toMap
+      seq.groupBy { case (key, _) => key }.transform((_, v) => v.map { case (_, value) => value })
 
     val partColNamesToPaths = groupByKey(pathWithPartitionValues.map {
       case (path, partValues) => partValues.columnNames -> path
@@ -561,16 +562,26 @@ object PartitioningUtils extends SQLConfHelper {
 
     SchemaUtils.checkColumnNameDuplication(partitionColumns, caseSensitive)
 
-    partitionColumnsSchema(schema, partitionColumns).foreach {
-      field => field.dataType match {
-        case _: AtomicType => // OK
-        case _ => throw QueryCompilationErrors.cannotUseDataTypeForPartitionColumnError(field)
+    partitionColumnsSchema(schema, partitionColumns).foreach { field =>
+      if (!canPartitionOn(field.dataType)) {
+        throw QueryCompilationErrors.invalidPartitionColumnDataTypeError(field)
       }
     }
 
     if (partitionColumns.nonEmpty && partitionColumns.size == schema.fields.length) {
       throw QueryCompilationErrors.cannotUseAllColumnsForPartitionColumnsError()
     }
+  }
+
+  /**
+   * Checks whether a given data type can be used as a partition column.
+   */
+  def canPartitionOn(dateType: DataType): Boolean = dateType match {
+    // non default collated strings should not be used as partition columns
+    // as we cannot implement string collation semantic with directory names
+    case st: StringType => st.supportsBinaryOrdering
+    case a: AtomicType => !a.isInstanceOf[VariantType]
+    case _ => false
   }
 
   def partitionColumnsSchema(

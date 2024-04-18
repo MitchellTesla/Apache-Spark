@@ -32,6 +32,7 @@ import java.time.{Duration, Instant, LocalDate, LocalDateTime, Period, ZoneOffse
 import java.util
 import java.util.Objects
 
+import scala.collection.{immutable, mutable}
 import scala.math.{BigDecimal, BigInt}
 import scala.reflect.runtime.universe.TypeTag
 import scala.util.Try
@@ -88,13 +89,15 @@ object Literal {
     case d: Duration => Literal(durationToMicros(d), DayTimeIntervalType())
     case p: Period => Literal(periodToMonths(p), YearMonthIntervalType())
     case a: Array[Byte] => Literal(a, BinaryType)
-    case a: collection.mutable.WrappedArray[_] => apply(a.array)
+    case a: mutable.ArraySeq[_] => apply(a.array)
+    case a: immutable.ArraySeq[_] => apply(a.unsafeArray)
     case a: Array[_] =>
       val elementType = componentTypeToDataType(a.getClass.getComponentType())
       val dataType = ArrayType(elementType)
       val convert = CatalystTypeConverters.createToCatalystConverter(dataType)
       Literal(convert(a), dataType)
     case i: CalendarInterval => Literal(i, CalendarIntervalType)
+    case v: VariantVal => Literal(v, VariantType)
     case null => Literal(null, NullType)
     case v: Literal => v
     case _ =>
@@ -141,6 +144,7 @@ object Literal {
     case _ if clz == classOf[BigInt] => DecimalType.SYSTEM_DEFAULT
     case _ if clz == classOf[BigDecimal] => DecimalType.SYSTEM_DEFAULT
     case _ if clz == classOf[CalendarInterval] => CalendarIntervalType
+    case _ if clz == classOf[VariantVal] => VariantType
 
     case _ if clz.isArray => ArrayType(componentTypeToDataType(clz.getComponentType))
 
@@ -191,13 +195,14 @@ object Literal {
     case TimestampNTZType => create(0L, TimestampNTZType)
     case it: DayTimeIntervalType => create(0L, it)
     case it: YearMonthIntervalType => create(0, it)
-    case StringType => Literal("")
+    case st: StringType => Literal(UTF8String.fromString(""), st)
     case BinaryType => Literal("".getBytes(StandardCharsets.UTF_8))
     case CalendarIntervalType => Literal(new CalendarInterval(0, 0, 0))
     case arr: ArrayType => create(Array(), arr)
     case map: MapType => create(Map(), map)
     case struct: StructType =>
-      create(InternalRow.fromSeq(struct.fields.map(f => default(f.dataType).value)), struct)
+      create(new GenericInternalRow(
+        struct.fields.map(f => default(f.dataType).value)), struct)
     case udt: UserDefinedType[_] => Literal(default(udt.sqlType).value, udt)
     case other =>
       throw QueryExecutionErrors.noDefaultForDataTypeError(dataType)
@@ -231,12 +236,15 @@ object Literal {
           }
         case PhysicalNullType => true
         case PhysicalShortType => v.isInstanceOf[Short]
-        case PhysicalStringType => v.isInstanceOf[UTF8String]
+        case _: PhysicalStringType => v.isInstanceOf[UTF8String]
+        case PhysicalVariantType => v.isInstanceOf[VariantVal]
         case st: PhysicalStructType =>
           v.isInstanceOf[InternalRow] && {
             val row = v.asInstanceOf[InternalRow]
             st.fields.map(_.dataType).zipWithIndex.forall {
-              case (fieldDataType, i) => doValidate(row.get(i, fieldDataType), fieldDataType)
+              case (fieldDataType, i) =>
+                // Do not need to validate null values.
+                row.isNullAt(i) || doValidate(row.get(i, fieldDataType), fieldDataType)
             }
           }
         case _ => false
@@ -312,7 +320,7 @@ object LongLiteral {
  */
 object StringLiteral {
   def unapply(a: Any): Option[String] = a match {
-    case Literal(s: UTF8String, StringType) => Some(s.toString)
+    case Literal(s: UTF8String, _: StringType) => Some(s.toString)
     case _ => None
   }
 }
@@ -479,9 +487,13 @@ case class Literal (value: Any, dataType: DataType) extends LeafExpression {
     case (v: UTF8String, StringType) =>
       // Escapes all backslashes and single quotes.
       "'" + v.toString.replace("\\", "\\\\").replace("'", "\\'") + "'"
-    case (v: Byte, ByteType) => v + "Y"
-    case (v: Short, ShortType) => v + "S"
-    case (v: Long, LongType) => v + "L"
+    case (v: UTF8String, st: StringType) =>
+      // Escapes all backslashes and single quotes.
+      "'" + v.toString.replace("\\", "\\\\").replace("'", "\\'") +
+        "'" + st.typeName.substring(6)
+    case (v: Byte, ByteType) => s"${v}Y"
+    case (v: Short, ShortType) => s"${v}S"
+    case (v: Long, LongType) => s"${v}L"
     // Float type doesn't have a suffix
     case (v: Float, FloatType) =>
       val castedValue = v match {
@@ -496,9 +508,9 @@ case class Literal (value: Any, dataType: DataType) extends LeafExpression {
         case _ if v.isNaN => s"CAST('NaN' AS ${DoubleType.sql})"
         case Double.PositiveInfinity => s"CAST('Infinity' AS ${DoubleType.sql})"
         case Double.NegativeInfinity => s"CAST('-Infinity' AS ${DoubleType.sql})"
-        case _ => v + "D"
+        case _ => s"${v}D"
       }
-    case (v: Decimal, t: DecimalType) => v + "BD"
+    case (v: Decimal, t: DecimalType) => s"${v}BD"
     case (v: Int, DateType) =>
       s"DATE '$toString'"
     case (v: Long, TimestampType) =>

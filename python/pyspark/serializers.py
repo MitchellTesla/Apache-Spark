@@ -29,7 +29,7 @@ Examples
 --------
 The serializer is chosen when creating :class:`SparkContext`:
 
->>> from pyspark.context import SparkContext
+>>> from pyspark.core.context import SparkContext
 >>> from pyspark.serializers import MarshalSerializer
 >>> sc = SparkContext('local', 'test', serializer=MarshalSerializer())
 >>> sc.parallelize(list(range(1000))).map(lambda x: 2 * x).take(10)
@@ -67,7 +67,6 @@ import pickle
 pickle_protocol = pickle.HIGHEST_PROTOCOL
 
 from pyspark import cloudpickle
-from pyspark.util import print_exec
 
 
 __all__ = [
@@ -304,7 +303,7 @@ class CartesianDeserializer(Serializer):
     def _load_stream_without_unbatching(self, stream):
         key_batch_stream = self.key_ser._load_stream_without_unbatching(stream)
         val_batch_stream = self.val_ser._load_stream_without_unbatching(stream)
-        for (key_batch, val_batch) in zip(key_batch_stream, val_batch_stream):
+        for key_batch, val_batch in zip(key_batch_stream, val_batch_stream):
             # for correctness with repeated cartesian/zip this must be returned as one batch
             yield product(key_batch, val_batch)
 
@@ -330,7 +329,7 @@ class PairDeserializer(Serializer):
     def _load_stream_without_unbatching(self, stream):
         key_batch_stream = self.key_ser._load_stream_without_unbatching(stream)
         val_batch_stream = self.val_ser._load_stream_without_unbatching(stream)
-        for (key_batch, val_batch) in zip(key_batch_stream, val_batch_stream):
+        for key_batch, val_batch in zip(key_batch_stream, val_batch_stream):
             # For double-zipped RDDs, the batches can be iterators from other PairDeserializer,
             # instead of lists. We need to convert them to lists if needed.
             key_batch = key_batch if hasattr(key_batch, "__len__") else list(key_batch)
@@ -455,6 +454,8 @@ class PickleSerializer(FramedSerializer):
 
 class CloudPickleSerializer(FramedSerializer):
     def dumps(self, obj):
+        from pyspark.util import print_exec
+
         try:
             return cloudpickle.dumps(obj, pickle_protocol)
         except pickle.PickleError:

@@ -26,10 +26,13 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path}
 import org.apache.hadoop.mapreduce.{InputFormat => NewInputFormat}
 
+import org.apache.spark.internal.LogKey.PATH
+import org.apache.spark.internal.MDC
 import org.apache.spark.rdd.{RDD, UnionRDD}
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.scheduler.StreamInputInfo
 import org.apache.spark.util.{SerializableConfiguration, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * This class represents an input stream that monitors a Hadoop-compatible filesystem for new
@@ -149,7 +152,7 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
       batchTimeToSelectedFiles += ((validTime, newFiles))
     }
     recentlySelectedFiles ++= newFiles
-    val rdds = Some(filesToRDD(newFiles))
+    val rdds = Some(filesToRDD(newFiles.toImmutableArraySeq))
     // Copy newFiles to immutable.List to prevent from being modified by the user
     val metadata = Map(
       "files" -> newFiles.toList,
@@ -287,9 +290,9 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
         case None => context.sparkContext.newAPIHadoopFile[K, V, F](file)
       }
       if (rdd.partitions.isEmpty) {
-        logError("File " + file + " has no data in it. Spark Streaming can only ingest " +
-          "files that have been \"moved\" to the directory assigned to the file stream. " +
-          "Refer to the streaming programming guide for more details.")
+        logError(log"File ${MDC(PATH, file)} has no data in it. Spark Streaming can only ingest " +
+          log"""files that have been "moved" to the directory assigned to the file stream. """ +
+          log"Refer to the streaming programming guide for more details.")
       }
       rdd
     }
@@ -343,7 +346,7 @@ class FileInputDStream[K, V, F <: NewInputFormat[K, V]](
             f.mkString("[", ", ", "]") )
           batchTimeToSelectedFiles.synchronized { batchTimeToSelectedFiles += ((t, f)) }
           recentlySelectedFiles ++= f
-          generatedRDDs += ((t, filesToRDD(f)))
+          generatedRDDs += ((t, filesToRDD(f.toImmutableArraySeq)))
       }
     }
 

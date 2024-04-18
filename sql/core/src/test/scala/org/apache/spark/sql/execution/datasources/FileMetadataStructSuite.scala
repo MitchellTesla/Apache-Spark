@@ -118,7 +118,7 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
     Seq("json", "parquet").foreach { testFileFormat =>
       test(s"metadata struct ($testFileFormat): " + testName) {
         withTempDir { dir =>
-          import scala.collection.JavaConverters._
+          import scala.jdk.CollectionConverters._
 
           // 1. create df0 and df1 and save under /data/f0 and /data/f1
           val df0 = spark.createDataFrame(data0.asJava, fileSchema)
@@ -244,7 +244,9 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
         df.select("name", METADATA_FILE_NAME).collect()
       },
       errorClass = "FIELD_NOT_FOUND",
-      parameters = Map("fieldName" -> "`file_name`", "fields" -> "`id`, `university`"))
+      parameters = Map("fieldName" -> "`file_name`", "fields" -> "`id`, `university`"),
+      context =
+        ExpectedContext(fragment = "select", callSitePattern = getCurrentClassCallSitePattern))
   }
 
   metadataColumnsTest("SPARK-42683: df metadataColumn - schema conflict",
@@ -417,14 +419,15 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
     val filteredDF = df.select("name", "age", METADATA_FILE_NAME)
       .where(Column(METADATA_FILE_NAME) === f0(METADATA_FILE_NAME))
 
-    // check the filtered file
+    // Check the filtered file.
     val partitions = filteredDF.queryExecution.sparkPlan.collectFirst {
-      case p: FileSourceScanExec => p.selectedPartitions
+      case p: FileSourceScanExec => p.selectedPartitions.filePartitionIterator.toSeq
     }.get
 
     assert(partitions.length == 1) // 1 partition
-    assert(partitions.head.files.length == 1) // 1 file in that partition
-    assert(partitions.head.files.head.getPath.toString == f0(METADATA_FILE_PATH)) // the file is f0
+    assert(partitions.head.numFiles == 1) // 1 file in that partition
+    // The file is f0.
+    assert(partitions.head.files.toSeq.head.getPath.toString == f0(METADATA_FILE_PATH))
 
     // check result
     checkAnswer(
@@ -462,14 +465,15 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
       // only user column
       .where("age == 31")
 
-    // check the filtered file
+    // Check the filtered file.
     val partitions = filteredDF.queryExecution.sparkPlan.collectFirst {
-      case p: FileSourceScanExec => p.selectedPartitions
+      case p: FileSourceScanExec => p.selectedPartitions.filePartitionIterator.toSeq
     }.get
 
     assert(partitions.length == 1) // 1 partition
-    assert(partitions.head.files.length == 1) // 1 file in that partition
-    assert(partitions.head.files.head.getPath.toString == f1(METADATA_FILE_PATH)) // the file is f1
+    assert(partitions.head.numFiles == 1) // 1 file in that partition
+    // The file is f0.
+    assert(partitions.head.files.toSeq.head.getPath.toString == f1(METADATA_FILE_PATH))
 
     // check result
     checkAnswer(
@@ -522,14 +526,20 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
               df.select("name", "_metadata.file_name").collect()
             },
             errorClass = "FIELD_NOT_FOUND",
-            parameters = Map("fieldName" -> "`file_name`", "fields" -> "`id`, `university`"))
+            parameters = Map("fieldName" -> "`file_name`", "fields" -> "`id`, `university`"),
+            context = ExpectedContext(
+              fragment = "select",
+              callSitePattern = getCurrentClassCallSitePattern))
 
           checkError(
             exception = intercept[AnalysisException] {
               df.select("name", "_METADATA.file_NAME").collect()
             },
             errorClass = "FIELD_NOT_FOUND",
-            parameters = Map("fieldName" -> "`file_NAME`", "fields" -> "`id`, `university`"))
+            parameters = Map("fieldName" -> "`file_NAME`", "fields" -> "`id`, `university`"),
+            context = ExpectedContext(
+              fragment = "select",
+              callSitePattern = getCurrentClassCallSitePattern))
         }
       }
     }
@@ -959,10 +969,12 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
           .where("_metadata.File_bLoCk_start > 0 and _metadata.file_block_length > 0 " +
             "and _metadata.file_SizE > 0")
           .select("id", METADATA_FILE_BLOCK_START, METADATA_FILE_BLOCK_LENGTH)
-        val fileSourceScan2 = df2.queryExecution.sparkPlan.find(_.isInstanceOf[FileSourceScanExec])
-        assert(fileSourceScan2.isDefined)
-        val files2 = fileSourceScan2.get.asInstanceOf[FileSourceScanExec].selectedPartitions
-        assert(files2.length == 1 && files2.head.files.length == 1)
+        val fileSourceScan2 = df2.queryExecution.sparkPlan.collectFirst {
+          case p: FileSourceScanExec => p
+        }.get
+        // Assert that there's 1 selected partition with 1 file.
+        assert(fileSourceScan2.selectedPartitions.partitionCount == 1)
+        assert(fileSourceScan2.selectedPartitions.totalNumberOfFiles == 1)
         val res2 = df2.collect()
         assert(res2.length == 1)
         assert(res2.head.getLong(0) == 1L) // id
@@ -973,10 +985,12 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
         val df3 = spark.read.json(path.getCanonicalPath)
           .where("_metadata.File_bLoCk_start > 0 and _metadata.file_SizE > 1000000")
           .select("id", METADATA_FILE_BLOCK_START, METADATA_FILE_BLOCK_LENGTH)
-        val fileSourceScan3 = df3.queryExecution.sparkPlan.find(_.isInstanceOf[FileSourceScanExec])
-        assert(fileSourceScan3.isDefined)
-        val files3 = fileSourceScan3.get.asInstanceOf[FileSourceScanExec].selectedPartitions
-        assert(files3.length == 1 && files3.head.files.isEmpty)
+        val fileSourceScan3 = df3.queryExecution.sparkPlan.collectFirst {
+          case p: FileSourceScanExec => p
+        }.get
+        // Assert that there's 1 selected partition with no files.
+        assert(fileSourceScan3.selectedPartitions.partitionCount == 1)
+        assert(fileSourceScan3.selectedPartitions.totalNumberOfFiles == 0)
         assert(df3.collect().isEmpty)
       }
     }
@@ -1075,7 +1089,8 @@ class FileMetadataStructSuite extends QueryTest with SharedSparkSession {
       // Transform the result into a literal that can be used in an expression.
       val metadataColumnFields = metadataColumnRow.schema.fields
         .map(field => lit(metadataColumnRow.getAs[Any](field.name)).as(field.name))
-      val metadataColumnStruct = struct(metadataColumnFields: _*)
+      import org.apache.spark.util.ArrayImplicits._
+      val metadataColumnStruct = struct(metadataColumnFields.toImmutableArraySeq: _*)
 
       val selectSingleRowDf = spark.read.load(dir.getAbsolutePath)
         .where(col("_metadata").equalTo(lit(metadataColumnStruct)))

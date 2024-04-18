@@ -23,10 +23,10 @@ import java.util.concurrent.{ConcurrentHashMap, LinkedBlockingQueue, ThreadPoolE
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
 import scala.collection
-import scala.collection.JavaConverters._
 import scala.collection.mutable.{HashMap, ListBuffer, Map}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.Duration
+import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
 import scala.util.control.NonFatal
 
@@ -34,7 +34,8 @@ import org.apache.commons.io.output.{ByteArrayOutputStream => ApacheByteArrayOut
 import org.roaringbitmap.RoaringBitmap
 
 import org.apache.spark.broadcast.{Broadcast, BroadcastManager}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey._
 import org.apache.spark.internal.config._
 import org.apache.spark.io.CompressionCodec
 import org.apache.spark.rpc.{RpcCallContext, RpcEndpoint, RpcEndpointRef, RpcEnv}
@@ -42,6 +43,7 @@ import org.apache.spark.scheduler.{MapStatus, MergeStatus, ShuffleOutputStatus}
 import org.apache.spark.shuffle.MetadataFetchFailedException
 import org.apache.spark.storage.{BlockId, BlockManagerId, ShuffleBlockId, ShuffleMergedBlockId}
 import org.apache.spark.util._
+import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.collection.OpenHashMap
 import org.apache.spark.util.io.{ChunkedByteBuffer, ChunkedByteBufferOutputStream}
 
@@ -680,6 +682,9 @@ private[spark] class MapOutputTrackerMaster(
   /** Whether to compute locality preferences for reduce tasks */
   private val shuffleLocalityEnabled = conf.get(SHUFFLE_REDUCE_LOCALITY_ENABLE)
 
+  private val shuffleMigrationEnabled = conf.get(DECOMMISSION_ENABLED) &&
+    conf.get(STORAGE_DECOMMISSION_ENABLED) && conf.get(STORAGE_DECOMMISSION_SHUFFLE_BLOCKS_ENABLED)
+
   // Number of map and reduce tasks above which we do not assign preferred locations based on map
   // output sizes. We limit the size of jobs for which assign preferred locations as computing the
   // top locations by size becomes expensive.
@@ -721,11 +726,12 @@ private[spark] class MapOutputTrackerMaster(
   // Make sure that we aren't going to exceed the max RPC message size by making sure
   // we use broadcast to send large map output statuses.
   if (minSizeForBroadcast > maxRpcMessageSize) {
-    val msg = s"${SHUFFLE_MAPOUTPUT_MIN_SIZE_FOR_BROADCAST.key} ($minSizeForBroadcast bytes) " +
-      s"must be <= spark.rpc.message.maxSize ($maxRpcMessageSize bytes) to prevent sending an " +
-      "rpc message that is too large."
-    logError(msg)
-    throw new IllegalArgumentException(msg)
+    val logEntry = log"${MDC(CONFIG, SHUFFLE_MAPOUTPUT_MIN_SIZE_FOR_BROADCAST.key)} " +
+      log"(${MDC(MIN_SIZE, minSizeForBroadcast)} bytes) " +
+      log"must be <= spark.rpc.message.maxSize (${MDC(MAX_SIZE, maxRpcMessageSize)} " +
+      log"bytes) to prevent sending an rpc message that is too large."
+    logError(logEntry)
+    throw new IllegalArgumentException(logEntry.message)
   }
 
   def post(message: MapOutputTrackerMasterMessage): Unit = {
@@ -740,7 +746,7 @@ private[spark] class MapOutputTrackerMaster(
         needMergeOutput: Boolean): Unit = {
       val hostPort = context.senderAddress.hostPort
       val shuffleStatus = shuffleStatuses.get(shuffleId).head
-      logDebug(s"Handling request to send ${if (needMergeOutput) "map" else "map/merge"}" +
+      logDebug(s"Handling request to send ${if (needMergeOutput) "map/merge" else "map"}" +
         s" output locations for shuffle $shuffleId to $hostPort")
       if (needMergeOutput) {
         context.reply(
@@ -775,7 +781,7 @@ private[spark] class MapOutputTrackerMaster(
                   .getOrElse(Seq.empty[BlockManagerId]))
             }
           } catch {
-            case NonFatal(e) => logError(e.getMessage, e)
+            case NonFatal(e) => logError(log"${MDC(ERROR, e.getMessage)}", e)
           }
         }
       } catch {
@@ -808,8 +814,10 @@ private[spark] class MapOutputTrackerMaster(
     shuffleStatuses.get(shuffleId) match {
       case Some(shuffleStatus) =>
         shuffleStatus.updateMapOutput(mapId, bmAddress)
+      case None if shuffleMigrationEnabled =>
+        logWarning(s"Asked to update map output for unknown shuffle ${shuffleId}")
       case None =>
-        logError(s"Asked to update map output for unknown shuffle ${shuffleId}")
+        logError(log"Asked to update map output for unknown shuffle ${MDC(SHUFFLE_ID, shuffleId)}")
     }
   }
 
@@ -901,12 +909,8 @@ private[spark] class MapOutputTrackerMaster(
   /** Unregister shuffle data */
   def unregisterShuffle(shuffleId: Int): Unit = {
     shuffleStatuses.remove(shuffleId).foreach { shuffleStatus =>
-      // SPARK-39553: Add protection for Scala 2.13 due to https://github.com/scala/bug/issues/12613
-      // We should revert this if Scala 2.13 solves this issue.
-      if (shuffleStatus != null) {
-        shuffleStatus.invalidateSerializedMapOutputStatusCache()
-        shuffleStatus.invalidateSerializedMergeOutputStatusCache()
-      }
+      shuffleStatus.invalidateSerializedMapOutputStatusCache()
+      shuffleStatus.invalidateSerializedMergeOutputStatusCache()
     }
   }
 
@@ -1053,7 +1057,7 @@ private[spark] class MapOutputTrackerMaster(
           val blockManagerIds = getLocationsWithLargestOutputs(dep.shuffleId, partitionId,
             dep.partitioner.numPartitions, REDUCER_PREF_LOCS_FRACTION)
           if (blockManagerIds.nonEmpty) {
-            blockManagerIds.get.map(_.host).distinct.toSeq
+            blockManagerIds.get.map(_.host).distinct.toImmutableArraySeq
           } else {
             Nil
           }
@@ -1141,7 +1145,7 @@ private[spark] class MapOutputTrackerMaster(
         if (startMapIndex < endMapIndex &&
           (startMapIndex >= 0 && endMapIndex <= statuses.length)) {
           val statusesPicked = statuses.slice(startMapIndex, endMapIndex).filter(_ != null)
-          statusesPicked.map(_.location.host).distinct.toSeq
+          statusesPicked.map(_.location.host).distinct.toImmutableArraySeq
         } else {
           Nil
         }
@@ -1734,9 +1738,11 @@ private[spark] object MapOutputTracker extends Logging {
 
   def validateStatus(status: ShuffleOutputStatus, shuffleId: Int, partition: Int) : Unit = {
     if (status == null) {
-      val errorMessage = s"Missing an output location for shuffle $shuffleId partition $partition"
+      // scalastyle:off line.size.limit
+      val errorMessage = log"Missing an output location for shuffle ${MDC(SHUFFLE_ID, shuffleId)} partition ${MDC(PARTITION_ID, partition)}"
+      // scalastyle:on
       logError(errorMessage)
-      throw new MetadataFetchFailedException(shuffleId, partition, errorMessage)
+      throw new MetadataFetchFailedException(shuffleId, partition, errorMessage.message)
     }
   }
 }

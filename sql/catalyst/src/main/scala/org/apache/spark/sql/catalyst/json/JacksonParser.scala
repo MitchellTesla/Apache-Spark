@@ -32,11 +32,12 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.util._
 import org.apache.spark.sql.catalyst.util.LegacyDateFormats.FAST_DATE_FORMAT
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns._
-import org.apache.spark.sql.errors.QueryExecutionErrors
+import org.apache.spark.sql.errors.{ExecutionErrors, QueryExecutionErrors}
 import org.apache.spark.sql.internal.{LegacyBehaviorPolicy, SQLConf}
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
-import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
+import org.apache.spark.types.variant._
+import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String, VariantVal}
 import org.apache.spark.util.Utils
 
 /**
@@ -105,9 +106,28 @@ class JacksonParser(
    */
   private def makeRootConverter(dt: DataType): JsonParser => Iterable[InternalRow] = {
     dt match {
+      case _: StructType if options.singleVariantColumn.isDefined => (parser: JsonParser) => {
+        Some(InternalRow(parseVariant(parser)))
+      }
       case st: StructType => makeStructRootConverter(st)
       case mt: MapType => makeMapRootConverter(mt)
       case at: ArrayType => makeArrayRootConverter(at)
+    }
+  }
+
+  protected final def parseVariant(parser: JsonParser): VariantVal = {
+    // Skips `FIELD_NAME` at the beginning. This check is adapted from `parseJsonToken`, but we
+    // cannot directly use the function here because it also handles the `VALUE_NULL` token and
+    // returns null (representing a SQL NULL). Instead, we want to return a variant null.
+    if (parser.getCurrentToken == FIELD_NAME) {
+      parser.nextToken()
+    }
+    try {
+      val v = VariantBuilder.parseJson(parser)
+      new VariantVal(v.getValue, v.getMetadata)
+    } catch {
+      case _: VariantSizeLimitException =>
+        throw QueryExecutionErrors.variantSizeLimitError(VariantUtil.SIZE_LIMIT, "JacksonParser")
     }
   }
 
@@ -231,7 +251,7 @@ class JacksonParser(
               Float.PositiveInfinity
             case "-INF" | "-Infinity" if options.allowNonNumericNumbers =>
               Float.NegativeInfinity
-            case _ => throw StringAsDataTypeException(parser.getCurrentName, parser.getText,
+            case _ => throw StringAsDataTypeException(parser.currentName, parser.getText,
               FloatType)
           }
       }
@@ -250,7 +270,7 @@ class JacksonParser(
               Double.PositiveInfinity
             case "-INF" | "-Infinity" if options.allowNonNumericNumbers =>
               Double.NegativeInfinity
-            case _ => throw StringAsDataTypeException(parser.getCurrentName, parser.getText,
+            case _ => throw StringAsDataTypeException(parser.currentName, parser.getText,
               DoubleType)
           }
       }
@@ -380,8 +400,10 @@ class JacksonParser(
         case _ => null
       }
 
+    case _: VariantType => parseVariant
+
     // We don't actually hit this exception though, we keep it for understandability
-    case _ => throw QueryExecutionErrors.unsupportedTypeError(dataType)
+    case _ => throw ExecutionErrors.unsupportedDataTypeError(dataType)
   }
 
   /**
@@ -420,17 +442,17 @@ class JacksonParser(
     case VALUE_STRING if parser.getTextLength < 1 && allowEmptyString =>
       dataType match {
         case FloatType | DoubleType | TimestampType | DateType =>
-          throw QueryExecutionErrors.emptyJsonFieldValueError(dataType)
+          throw EmptyJsonFieldValueException(dataType)
         case _ => null
       }
 
     case VALUE_STRING if parser.getTextLength < 1 =>
-      throw QueryExecutionErrors.emptyJsonFieldValueError(dataType)
+      throw EmptyJsonFieldValueException(dataType)
 
     case token =>
       // We cannot parse this token based on the given data type. So, we throw a
       // RuntimeException and this exception will be caught by `parse` method.
-      throw QueryExecutionErrors.cannotParseJSONFieldError(parser, token, dataType)
+      throw CannotParseJSONFieldException(parser.currentName, parser.getText, token, dataType)
   }
 
   /**
@@ -451,7 +473,7 @@ class JacksonParser(
     lazy val bitmask = ResolveDefaultColumns.existenceDefaultsBitmask(schema)
     resetExistenceDefaultsBitmask(schema, bitmask)
     while (!skipRow && nextUntil(parser, JsonToken.END_OBJECT)) {
-      schema.getFieldIndex(parser.getCurrentName) match {
+      schema.getFieldIndex(parser.currentName) match {
         case Some(index) =>
           try {
             row.update(index, fieldConverters(index).apply(parser))
@@ -459,6 +481,11 @@ class JacksonParser(
             bitmask(index) = false
           } catch {
             case e: SparkUpgradeException => throw e
+            case err: PartialValueException if enablePartialResults =>
+              badRecordException = badRecordException.orElse(Some(err.cause))
+              row.update(index, err.partialResult)
+              skipRow = structFilters.skipRow(row, index)
+              bitmask(index) = false
             case NonFatal(e) if isRoot || enablePartialResults =>
               badRecordException = badRecordException.orElse(Some(e))
               parser.skipChildren()
@@ -488,13 +515,13 @@ class JacksonParser(
     var badRecordException: Option[Throwable] = None
 
     while (nextUntil(parser, JsonToken.END_OBJECT)) {
-      keys += UTF8String.fromString(parser.getCurrentName)
+      keys += UTF8String.fromString(parser.currentName)
       try {
         values += fieldConverter.apply(parser)
       } catch {
-        case PartialResultException(row, cause) if enablePartialResults =>
-          badRecordException = badRecordException.orElse(Some(cause))
-          values += row
+        case err: PartialValueException if enablePartialResults =>
+          badRecordException = badRecordException.orElse(Some(err.cause))
+          values += err.partialResult
         case NonFatal(e) if enablePartialResults =>
           badRecordException = badRecordException.orElse(Some(e))
           parser.skipChildren()
@@ -508,7 +535,7 @@ class JacksonParser(
     if (badRecordException.isEmpty) {
       mapData
     } else {
-      throw PartialResultException(InternalRow(mapData), badRecordException.get)
+      throw PartialMapDataResultException(mapData, badRecordException.get)
     }
   }
 
@@ -529,9 +556,9 @@ class JacksonParser(
         if (isRoot && v == null) throw QueryExecutionErrors.rootConverterReturnNullError()
         values += v
       } catch {
-        case PartialResultException(row, cause) if enablePartialResults =>
-          badRecordException = badRecordException.orElse(Some(cause))
-          values += row
+        case err: PartialValueException if enablePartialResults =>
+          badRecordException = badRecordException.orElse(Some(err.cause))
+          values += err.partialResult
       }
     }
 
@@ -543,8 +570,19 @@ class JacksonParser(
       throw PartialResultArrayException(arrayData.toArray[InternalRow](schema),
         badRecordException.get)
     } else {
-      throw PartialResultException(InternalRow(arrayData), badRecordException.get)
+      throw PartialArrayDataResultException(arrayData, badRecordException.get)
     }
+  }
+
+  /**
+   * Converts the non-stacktrace exceptions to user-friendly QueryExecutionErrors.
+   */
+  private def convertCauseForPartialResult(err: Throwable): Throwable = err match {
+    case CannotParseJSONFieldException(fieldName, fieldValue, jsonType, dataType) =>
+      QueryExecutionErrors.cannotParseJSONFieldError(fieldName, fieldValue, jsonType, dataType)
+    case EmptyJsonFieldValueException(dataType) =>
+      QueryExecutionErrors.emptyJsonFieldValueError(dataType)
+    case _ => err
   }
 
   /**
@@ -589,12 +627,25 @@ class JacksonParser(
         throw BadRecordException(
           record = () => recordLiteral(record),
           partialResults = () => Array(row),
-          cause)
+          convertCauseForPartialResult(cause))
       case PartialResultArrayException(rows, cause) =>
         throw BadRecordException(
           record = () => recordLiteral(record),
           partialResults = () => rows,
           cause)
+      // These exceptions should never be thrown outside of JacksonParser.
+      // They are used for the control flow in the parser. We add them here for completeness
+      // since they also indicate a bad record.
+      case PartialArrayDataResultException(arrayData, cause) =>
+        throw BadRecordException(
+          record = () => recordLiteral(record),
+          partialResults = () => Array(InternalRow(arrayData)),
+          convertCauseForPartialResult(cause))
+      case PartialMapDataResultException(mapData, cause) =>
+        throw BadRecordException(
+          record = () => recordLiteral(record),
+          partialResults = () => Array(InternalRow(mapData)),
+          convertCauseForPartialResult(cause))
     }
   }
 }

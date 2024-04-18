@@ -18,13 +18,14 @@ package org.apache.spark.sql.execution.datasources.parquet
 
 import java.io.File
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.hadoop.fs.Path
 import org.apache.parquet.column.ParquetProperties._
 import org.apache.parquet.hadoop.{ParquetFileReader, ParquetOutputFormat}
 import org.apache.parquet.hadoop.ParquetWriter.DEFAULT_BLOCK_SIZE
 
+import org.apache.spark.SparkException
 import org.apache.spark.sql.QueryTest
 import org.apache.spark.sql.execution.FileSourceScanExec
 import org.apache.spark.sql.execution.datasources.FileFormat
@@ -35,6 +36,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.sql.types.{LongType, StringType}
 import org.apache.spark.tags.SlowSQLTest
+import org.apache.spark.util.ArrayImplicits._
 
 @SlowSQLTest
 class ParquetRowIndexSuite extends QueryTest with SharedSparkSession {
@@ -49,7 +51,7 @@ class ParquetRowIndexSuite extends QueryTest with SharedSparkSession {
     assert(dir.isDirectory)
     dir.listFiles()
       .filter { f => f.isFile && f.getName.endsWith("parquet") }
-      .map { f => readRowGroupRowCounts(f.getAbsolutePath) }
+      .map { f => readRowGroupRowCounts(f.getAbsolutePath) }.toImmutableArraySeq
   }
 
   /**
@@ -316,8 +318,10 @@ class ParquetRowIndexSuite extends QueryTest with SharedSparkSession {
             .schema(schemaWithRowIdx)
             .load(path.getAbsolutePath)
 
-          val exception = intercept[Exception](dfRead.collect())
-          assert(exception.getMessage.contains(ParquetFileFormat.ROW_INDEX_TEMPORARY_COLUMN_NAME))
+          val exception = intercept[SparkException](dfRead.collect())
+          assert(exception.getErrorClass.startsWith("FAILED_READ_FILE"))
+          assert(exception.getCause.getMessage.contains(
+            ParquetFileFormat.ROW_INDEX_TEMPORARY_COLUMN_NAME))
         }
       }
     }

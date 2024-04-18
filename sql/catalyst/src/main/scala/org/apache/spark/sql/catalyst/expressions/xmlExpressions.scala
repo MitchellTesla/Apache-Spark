@@ -14,20 +14,42 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.sql.catalyst.expressions.xml
+package org.apache.spark.sql.catalyst.expressions
+
+import java.io.CharArrayWriter
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
-import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.DataTypeMismatch
-import org.apache.spark.sql.catalyst.expressions.{ExpectsInputTypes, Expression, ExpressionDescription, ExprUtils, NullIntolerant, TimeZoneAwareExpression, UnaryExpression}
+import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{DataTypeMismatch, TypeCheckSuccess}
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
-import org.apache.spark.sql.catalyst.util.{ArrayData, FailFastMode, FailureSafeParser, GenericArrayData, PermissiveMode}
-import org.apache.spark.sql.catalyst.xml.{StaxXmlParser, ValidatorUtil, XmlInferSchema, XmlOptions}
+import org.apache.spark.sql.catalyst.util.{ArrayData, DropMalformedMode, FailFastMode, FailureSafeParser, GenericArrayData, PermissiveMode}
+import org.apache.spark.sql.catalyst.util.TypeUtils._
+import org.apache.spark.sql.catalyst.xml.{StaxXmlGenerator, StaxXmlParser, ValidatorUtil, XmlInferSchema, XmlOptions}
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryErrorsBase}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
+/**
+ * Converts an XML input string to a [[StructType]] with the specified schema.
+ * It is assumed that the XML input string constitutes a single record; so the
+ * [[rowTag]] option will be not applicable.
+ */
+// scalastyle:off line.size.limit
+@ExpressionDescription(
+  usage = "_FUNC_(xmlStr, schema[, options]) - Returns a struct value with the given `xmlStr` and `schema`.",
+  examples = """
+    Examples:
+      > SELECT _FUNC_('<p><a>1</a><b>0.8</b></p>', 'a INT, b DOUBLE');
+       {"a":1,"b":0.8}
+      > SELECT _FUNC_('<p><time>26/08/2015</time></p>', 'time Timestamp', map('timestampFormat', 'dd/MM/yyyy'));
+       {"time":2015-08-26 00:00:00}
+      > SELECT _FUNC_('<p><teacher>Alice</teacher><student><name>Bob</name><rank>1</rank></student><student><name>Charlie</name><rank>2</rank></student></p>', 'STRUCT<teacher: STRING, student: ARRAY<STRUCT<name: STRING, rank: INT>>>');
+       {"teacher":"Alice","student":[{"name":"Bob","rank":1},{"name":"Charlie","rank":2}]}
+  """,
+  group = "xml_funcs",
+  since = "4.0.0")
+// scalastyle:on line.size.limit
 case class XmlToStructs(
     schema: DataType,
     options: Map[String, String],
@@ -138,8 +160,10 @@ case class XmlToStructs(
   usage = "_FUNC_(xml[, options]) - Returns schema in the DDL format of XML string.",
   examples = """
     Examples:
-      > SELECT _FUNC_('1,abc');
-       STRUCT<_c0: INT, _c1: STRING>
+      > SELECT _FUNC_('<p><a>1</a></p>');
+       STRUCT<a: BIGINT>
+      > SELECT _FUNC_('<p><a attr="2">1</a><a>3</a></p>', map('excludeAttribute', 'true'));
+       STRUCT<a: ARRAY<BIGINT>>
   """,
   since = "4.0.0",
   group = "xml_funcs")
@@ -165,6 +189,14 @@ case class SchemaOfXml(
   private lazy val xmlFactory = xmlOptions.buildXmlFactory()
 
   @transient
+  private lazy val xmlInferSchema = {
+    if (xmlOptions.parseMode == DropMalformedMode) {
+      throw QueryCompilationErrors.parseModeUnsupportedError("schema_of_xml", xmlOptions.parseMode)
+    }
+    new XmlInferSchema(xmlOptions, caseSensitive = SQLConf.get.caseSensitiveAnalysis)
+  }
+
+  @transient
   private lazy val xml = child.eval().asInstanceOf[UTF8String]
 
   override def checkInputDataTypes(): TypeCheckResult = {
@@ -174,7 +206,7 @@ case class SchemaOfXml(
       DataTypeMismatch(
         errorSubClass = "NON_FOLDABLE_INPUT",
         messageParameters = Map(
-          "inputName" -> "xml",
+          "inputName" -> toSQLId("xml"),
           "inputType" -> toSQLType(child.dataType),
           "inputExpr" -> toSQLExpr(child)))
     } else {
@@ -185,16 +217,16 @@ case class SchemaOfXml(
   }
 
   override def eval(v: InternalRow): Any = {
-    val dataType = XmlInferSchema.infer(xml.toString, xmlOptions).get match {
+    val dataType = xmlInferSchema.infer(xml.toString).get match {
       case st: StructType =>
-        XmlInferSchema.canonicalizeType(st).getOrElse(StructType(Nil))
+        xmlInferSchema.canonicalizeType(st).getOrElse(StructType(Nil))
       case at: ArrayType if at.elementType.isInstanceOf[StructType] =>
-        XmlInferSchema
+        xmlInferSchema
           .canonicalizeType(at.elementType)
           .map(ArrayType(_, containsNull = at.containsNull))
           .getOrElse(ArrayType(StructType(Nil), containsNull = at.containsNull))
       case other: DataType =>
-        XmlInferSchema.canonicalizeType(other).getOrElse(StringType)
+        xmlInferSchema.canonicalizeType(other).getOrElse(StringType)
     }
 
     UTF8String.fromString(dataType.sql)
@@ -203,5 +235,102 @@ case class SchemaOfXml(
   override def prettyName: String = "schema_of_xml"
 
   override protected def withNewChildInternal(newChild: Expression): SchemaOfXml =
+    copy(child = newChild)
+}
+
+/**
+ * Converts a [[StructType]] to a XML output string.
+ */
+// scalastyle:off line.size.limit
+@ExpressionDescription(
+  usage = "_FUNC_(expr[, options]) - Returns a XML string with a given struct value",
+  examples = """
+    Examples:
+      > SELECT _FUNC_(named_struct('a', 1, 'b', 2));
+       <ROW>
+           <a>1</a>
+           <b>2</b>
+       </ROW>
+      > SELECT _FUNC_(named_struct('time', to_timestamp('2015-08-26', 'yyyy-MM-dd')), map('timestampFormat', 'dd/MM/yyyy'));
+       <ROW>
+           <time>26/08/2015</time>
+       </ROW>
+  """,
+  since = "4.0.0",
+  group = "xml_funcs")
+// scalastyle:on line.size.limit
+case class StructsToXml(
+    options: Map[String, String],
+    child: Expression,
+    timeZoneId: Option[String] = None)
+  extends UnaryExpression
+  with TimeZoneAwareExpression
+  with CodegenFallback
+  with ExpectsInputTypes
+  with NullIntolerant {
+  override def nullable: Boolean = true
+
+  def this(options: Map[String, String], child: Expression) = this(options, child, None)
+
+  // Used in `FunctionRegistry`
+  def this(child: Expression) = this(Map.empty, child, None)
+
+  def this(child: Expression, options: Expression) =
+    this(
+      options = ExprUtils.convertToMapData(options),
+      child = child,
+      timeZoneId = None)
+
+  override def checkInputDataTypes(): TypeCheckResult = {
+    child.dataType match {
+      case _: StructType => TypeCheckSuccess
+      case _ => DataTypeMismatch(
+        errorSubClass = "UNEXPECTED_INPUT_TYPE",
+        messageParameters = Map(
+          "paramIndex" -> ordinalNumber(0),
+          "requiredType" -> toSQLType(StructType),
+          "inputSql" -> toSQLExpr(child),
+          "inputType" -> toSQLType(child.dataType)
+        )
+      )
+    }
+  }
+
+  @transient
+  lazy val writer = new CharArrayWriter()
+
+  @transient
+  lazy val inputSchema: StructType = child.dataType.asInstanceOf[StructType]
+
+  @transient
+  lazy val gen = new StaxXmlGenerator(
+    inputSchema, writer, new XmlOptions(options, timeZoneId.get), false)
+
+  // This converts rows to the XML output according to the given schema.
+  @transient
+  lazy val converter: Any => UTF8String = {
+    def getAndReset(): UTF8String = {
+      gen.flush()
+      val xmlString = writer.toString
+      writer.reset()
+      UTF8String.fromString(xmlString)
+    }
+    (row: Any) =>
+      gen.write(row.asInstanceOf[InternalRow])
+      getAndReset()
+  }
+
+  override def dataType: DataType = StringType
+
+  override def withTimeZone(timeZoneId: String): TimeZoneAwareExpression =
+    copy(timeZoneId = Option(timeZoneId))
+
+  override def nullSafeEval(value: Any): Any = converter(value)
+
+  override def inputTypes: Seq[AbstractDataType] = StructType :: Nil
+
+  override def prettyName: String = "to_xml"
+
+  override protected def withNewChildInternal(newChild: Expression): StructsToXml =
     copy(child = newChild)
 }

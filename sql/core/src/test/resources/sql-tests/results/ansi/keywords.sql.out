@@ -44,6 +44,7 @@ CLUSTER	false
 CLUSTERED	false
 CODEGEN	false
 COLLATE	true
+COLLATION	true
 COLLECTION	false
 COLUMN	true
 COLUMNS	false
@@ -96,9 +97,11 @@ ELSE	true
 END	true
 ESCAPE	true
 ESCAPED	false
+EVOLUTION	false
 EXCEPT	true
 EXCHANGE	false
 EXCLUDE	false
+EXECUTE	true
 EXISTS	false
 EXPLAIN	false
 EXPORT	false
@@ -133,6 +136,7 @@ IDENTIFIER	false
 IF	false
 IGNORE	false
 ILIKE	false
+IMMEDIATE	false
 IMPORT	false
 IN	true
 INCLUDE	false
@@ -188,6 +192,7 @@ NANOSECOND	false
 NANOSECONDS	false
 NATURAL	true
 NO	false
+NOT	true
 NULL	true
 NULLS	false
 NUMERIC	false
@@ -320,6 +325,7 @@ VALUES	false
 VAR	false
 VARCHAR	false
 VARIABLE	false
+VARIANT	false
 VERSION	false
 VIEW	false
 VIEWS	false
@@ -352,6 +358,7 @@ CASE
 CAST
 CHECK
 COLLATE
+COLLATION
 COLUMN
 CONSTRAINT
 CREATE
@@ -365,6 +372,7 @@ ELSE
 END
 ESCAPE
 EXCEPT
+EXECUTE
 FALSE
 FETCH
 FILTER
@@ -385,6 +393,7 @@ LATERAL
 LEADING
 LEFT
 NATURAL
+NOT
 NULL
 OFFSET
 ON

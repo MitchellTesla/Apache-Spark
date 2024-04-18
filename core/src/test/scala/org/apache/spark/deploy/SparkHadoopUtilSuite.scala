@@ -39,19 +39,6 @@ class SparkHadoopUtilSuite extends SparkFunSuite {
     assertConfigMatches(hadoopConf, "orc.filterPushdown", "true", SOURCE_SPARK_HADOOP)
     assertConfigMatches(hadoopConf, "fs.s3a.downgrade.syncable.exceptions", "true",
       SET_TO_DEFAULT_VALUES)
-    assertConfigMatches(hadoopConf, "fs.s3a.endpoint", "s3.amazonaws.com", SET_TO_DEFAULT_VALUES)
-  }
-
-  /**
-   * An empty S3A endpoint will be overridden just as a null value
-   * would.
-   */
-  test("appendSparkHadoopConfigs with S3A endpoint set to empty string") {
-    val sc = new SparkConf()
-    val hadoopConf = new Configuration(false)
-    sc.set("spark.hadoop.fs.s3a.endpoint", "")
-    new SparkHadoopUtil().appendSparkHadoopConfigs(sc, hadoopConf)
-    assertConfigMatches(hadoopConf, "fs.s3a.endpoint", "s3.amazonaws.com", SET_TO_DEFAULT_VALUES)
   }
 
   /**
@@ -61,28 +48,8 @@ class SparkHadoopUtilSuite extends SparkFunSuite {
     val sc = new SparkConf()
     val hadoopConf = new Configuration(false)
     sc.set("spark.hadoop.fs.s3a.downgrade.syncable.exceptions", "false")
-    sc.set("spark.hadoop.fs.s3a.endpoint", "s3-eu-west-1.amazonaws.com")
     new SparkHadoopUtil().appendSparkHadoopConfigs(sc, hadoopConf)
     assertConfigValue(hadoopConf, "fs.s3a.downgrade.syncable.exceptions", "false")
-    assertConfigValue(hadoopConf, "fs.s3a.endpoint",
-      "s3-eu-west-1.amazonaws.com")
-  }
-
-  /**
-   * If the endpoint region is set (even to a blank string) in
-   * "spark.hadoop.fs.s3a.endpoint.region" then the endpoint is not set,
-   * even when the s3a endpoint is "".
-   * This supports a feature in hadoop 3.3.1 where this configuration
-   * pair triggers a revert to the "SDK to work out the region" algorithm,
-   * which works on EC2 deployments.
-   */
-  test("appendSparkHadoopConfigs with S3A endpoint region set to an empty string") {
-    val sc = new SparkConf()
-    val hadoopConf = new Configuration(false)
-    sc.set("spark.hadoop.fs.s3a.endpoint.region", "")
-    new SparkHadoopUtil().appendSparkHadoopConfigs(sc, hadoopConf)
-    // the endpoint value will not have been set
-    assertConfigValue(hadoopConf, "fs.s3a.endpoint", null)
   }
 
   /**
@@ -110,8 +77,9 @@ class SparkHadoopUtilSuite extends SparkFunSuite {
   test("SPARK-40640: aws credentials from environment variables") {
     val hadoopConf = new Configuration(false)
     SparkHadoopUtil.appendS3CredentialsFromEnvironment(hadoopConf,
-      "access-key", "secret-key", "session-token")
+      "endpoint", "access-key", "secret-key", "session-token")
     val source = "Set by Spark on " + InetAddress.getLocalHost + " from "
+    assertConfigMatches(hadoopConf, "fs.s3a.endpoint", "endpoint", source)
     assertConfigMatches(hadoopConf, "fs.s3a.access.key", "access-key", source)
     assertConfigMatches(hadoopConf, "fs.s3a.secret.key", "secret-key", source)
     assertConfigMatches(hadoopConf, "fs.s3a.session.token", "session-token", source)
@@ -119,8 +87,16 @@ class SparkHadoopUtilSuite extends SparkFunSuite {
 
   test("SPARK-19739: S3 session token propagation requires access and secret keys") {
     val hadoopConf = new Configuration(false)
-    SparkHadoopUtil.appendS3CredentialsFromEnvironment(hadoopConf, null, null, "session-token")
+    SparkHadoopUtil.appendS3CredentialsFromEnvironment(
+      hadoopConf, null, null, null, "session-token")
     assertConfigValue(hadoopConf, "fs.s3a.session.token", null)
+  }
+
+  test("SPARK-45404: aws endpoint propagation requires access and secret keys") {
+    val hadoopConf = new Configuration(false)
+    SparkHadoopUtil.appendS3CredentialsFromEnvironment(
+      hadoopConf, "endpoint", null, null, null)
+    assertConfigValue(hadoopConf, "fs.s3a.endpoint", null)
   }
 
   test("substituteHadoopVariables") {

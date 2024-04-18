@@ -43,7 +43,8 @@ import org.apache.spark.deploy.{ExecutorFailureTracker, SparkHadoopUtil}
 import org.apache.spark.deploy.history.HistoryServer
 import org.apache.spark.deploy.security.HadoopDelegationTokenManager
 import org.apache.spark.deploy.yarn.config._
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.{EXIT_CODE, FAILURES, HOST_PORT}
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.metrics.{MetricsSystem, MetricsSystemInstances}
@@ -104,7 +105,7 @@ private[spark] class ApplicationMaster(
   @volatile private var exitCode = 0
   @volatile private var unregistered = false
   @volatile private var finished = false
-  @volatile private var finalStatus = getDefaultFinalStatus
+  @volatile private var finalStatus = getDefaultFinalStatus()
   @volatile private var finalMsg: String = ""
   @volatile private var userClassThread: Thread = _
 
@@ -515,7 +516,7 @@ private[spark] class ApplicationMaster(
         val driverRef = rpcEnv.setupEndpointRef(
           RpcAddress(host, port),
           YarnSchedulerBackend.ENDPOINT_NAME)
-        createAllocator(driverRef, userConf, rpcEnv, appAttemptId, distCacheConf)
+        createAllocator(driverRef, userConf, rpcEnv, appAttemptId, distCacheConf())
       } else {
         // Sanity check; should never happen in normal operation, since sc should only be null
         // if the user app did not create a SparkContext.
@@ -553,7 +554,7 @@ private[spark] class ApplicationMaster(
       YarnSchedulerBackend.ENDPOINT_NAME)
     addAmIpFilter(Some(driverRef),
       System.getenv(ApplicationConstants.APPLICATION_WEB_PROXY_BASE_ENV))
-    createAllocator(driverRef, sparkConf, rpcEnv, appAttemptId, distCacheConf)
+    createAllocator(driverRef, sparkConf, rpcEnv, appAttemptId, distCacheConf())
 
     // In client mode the actor will stop the reporter thread.
     reporterThread.join()
@@ -596,7 +597,8 @@ private[spark] class ApplicationMaster(
               ApplicationMaster.EXIT_REPORTER_FAILURE, "Exception was thrown " +
                 s"$failureCount time(s) from Reporter thread.")
           } else {
-            logWarning(s"Reporter thread fails $failureCount time(s) in a row.", e)
+            logWarning(
+              log"Reporter thread fails ${MDC(FAILURES, failureCount)} time(s) in a row.", e)
           }
       }
       try {
@@ -745,9 +747,10 @@ private[spark] class ApplicationMaster(
               case _: InterruptedException =>
                 // Reporter thread can interrupt to stop user class
               case SparkUserAppException(exitCode) =>
-                val msg = s"User application exited with status $exitCode"
+                val msg = log"User application exited with status " +
+                  log"${MDC(EXIT_CODE, exitCode)}"
                 logError(msg)
-                finish(FinalApplicationStatus.FAILED, exitCode, msg)
+                finish(FinalApplicationStatus.FAILED, exitCode, msg.message)
               case cause: Throwable =>
                 logError("User class threw exception: ", cause)
                 finish(FinalApplicationStatus.FAILED,
@@ -854,7 +857,8 @@ private[spark] class ApplicationMaster(
             logInfo(s"Driver terminated or disconnected! Shutting down. $remoteAddress")
             finish(FinalApplicationStatus.SUCCEEDED, ApplicationMaster.EXIT_SUCCESS)
           } else {
-            logError(s"Driver terminated with exit code ${exitCode}! Shutting down. $remoteAddress")
+            logError(log"Driver terminated with exit code ${MDC(EXIT_CODE, exitCode)}! " +
+              log"Shutting down. ${MDC(HOST_PORT, remoteAddress)}")
             finish(FinalApplicationStatus.FAILED, exitCode)
           }
         } else {

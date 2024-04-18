@@ -19,7 +19,7 @@ package org.apache.spark.sql
 
 import java.util.{Locale, Properties}
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.spark.Partition
 import org.apache.spark.annotation.Stable
@@ -77,6 +77,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
     if (schema != null) {
       val replaced = CharVarcharUtils.failIfHasCharVarchar(schema).asInstanceOf[StructType]
       this.userSpecifiedSchema = Option(replaced)
+      validateSingleVariantColumn()
     }
     this
   }
@@ -106,6 +107,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
    */
   def option(key: String, value: String): DataFrameReader = {
     this.extraOptions = this.extraOptions + (key -> value)
+    validateSingleVariantColumn()
     this
   }
 
@@ -149,6 +151,7 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
    */
   def options(options: scala.collection.Map[String, String]): DataFrameReader = {
     this.extraOptions ++= options
+    validateSingleVariantColumn()
     this
   }
 
@@ -565,7 +568,10 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
    * @since 4.0.0
    */
   @scala.annotation.varargs
-  def xml(paths: String*): DataFrame = format("xml").load(paths: _*)
+  def xml(paths: String*): DataFrame = {
+    userSpecifiedSchema.foreach(checkXmlSchema)
+    format("xml").load(paths: _*)
+  }
 
   /**
    * Loads an `Dataset[String]` storing XML object and returns the result as a `DataFrame`.
@@ -760,6 +766,17 @@ class DataFrameReader private[sql](sparkSession: SparkSession) extends Logging {
   private def assertNoSpecifiedSchema(operation: String): Unit = {
     if (userSpecifiedSchema.nonEmpty) {
       throw QueryCompilationErrors.userSpecifiedSchemaUnsupportedError(operation)
+    }
+  }
+
+  /**
+   * Ensure that the `singleVariantColumn` option cannot be used if there is also a user specified
+   * schema.
+   */
+  private def validateSingleVariantColumn(): Unit = {
+    if (extraOptions.get(JSONOptions.SINGLE_VARIANT_COLUMN).isDefined &&
+      userSpecifiedSchema.isDefined) {
+      throw QueryCompilationErrors.invalidSingleVariantColumn()
     }
   }
 

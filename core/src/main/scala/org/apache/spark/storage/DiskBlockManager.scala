@@ -30,12 +30,14 @@ import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.executor.ExecutorExitCode
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.{config, Logging, MDC}
+import org.apache.spark.internal.LogKey.{MERGE_DIR_NAME, PATH}
 import org.apache.spark.network.shuffle.ExecutorDiskUtils
 import org.apache.spark.storage.DiskBlockManager.ATTEMPT_ID_KEY
 import org.apache.spark.storage.DiskBlockManager.MERGE_DIR_KEY
 import org.apache.spark.storage.DiskBlockManager.MERGE_DIRECTORY
 import org.apache.spark.util.{ShutdownHookManager, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 /**
  * Creates and maintains the logical mapping between logical blocks and physical on-disk
@@ -79,9 +81,9 @@ private[spark] class DiskBlockManager(
   private val shutdownHook = addShutdownHook()
 
   // If either of these features are enabled, we must change permissions on block manager
-  // directories and files to accomodate the shuffle service deleting files in a secure environment.
-  // Parent directories are assumed to be restrictive to prevent unauthorized users from accessing
-  // or modifying world readable files.
+  // directories and files to accommodate the shuffle service deleting files in a secure
+  // environment. Parent directories are assumed to be restrictive to prevent unauthorized users
+  // from accessing or modifying world readable files.
   private val permissionChangingRequired = conf.get(config.SHUFFLE_SERVICE_ENABLED) && (
     conf.get(config.SHUFFLE_SERVICE_REMOVE_SHUFFLE_ENABLED) ||
     conf.get(config.SHUFFLE_SERVICE_FETCH_RDD_ENABLED)
@@ -167,8 +169,8 @@ private[spark] class DiskBlockManager(
       }
     }.filter(_ != null).flatMap { dir =>
       val files = dir.listFiles()
-      if (files != null) files.toSeq else Seq.empty
-    }
+      if (files != null) files.toImmutableArraySeq else Seq.empty
+    }.toImmutableArraySeq
   }
 
   /** List all the blocks currently stored on disk by the disk manager. */
@@ -254,7 +256,8 @@ private[spark] class DiskBlockManager(
         Some(localDir)
       } catch {
         case e: IOException =>
-          logError(s"Failed to create local dir in $rootDir. Ignoring this directory.", e)
+          logError(
+            log"Failed to create local dir in ${MDC(PATH, rootDir)}. Ignoring this directory.", e)
           None
       }
     }
@@ -291,7 +294,8 @@ private[spark] class DiskBlockManager(
         } catch {
           case e: IOException =>
             logError(
-              s"Failed to create $mergeDirName dir in $rootDir. Ignoring this directory.", e)
+              log"Failed to create ${MDC(MERGE_DIR_NAME, mergeDirName)} dir in " +
+                log"${MDC(PATH, rootDir)}. Ignoring this directory.", e)
         }
       }
     }
@@ -369,7 +373,7 @@ private[spark] class DiskBlockManager(
             }
           } catch {
             case e: Exception =>
-              logError(s"Exception while deleting local spark dir: $localDir", e)
+              logError(log"Exception while deleting local spark dir: ${MDC(PATH, localDir)}", e)
           }
         }
       }

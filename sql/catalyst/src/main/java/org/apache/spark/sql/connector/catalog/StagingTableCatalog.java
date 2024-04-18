@@ -38,7 +38,7 @@ import org.apache.spark.sql.types.StructType;
  * SELECT and REPLACE TABLE AS SELECT operations are atomic. For example, when one runs a REPLACE
  * TABLE AS SELECT operation, if the catalog does not implement this trait, the planner will first
  * drop the table via {@link TableCatalog#dropTable(Identifier)}, then create the table via
- * {@link TableCatalog#createTable(Identifier, StructType, Transform[], Map)}, and then perform
+ * {@link TableCatalog#createTable(Identifier, Column[], Transform[], Map)}, and then perform
  * the write via {@link SupportsWrite#newWriteBuilder(LogicalWriteInfo)}.
  * However, if the write operation fails, the catalog will have already dropped the table, and the
  * planner cannot roll back the dropping of the table.
@@ -57,10 +57,10 @@ public interface StagingTableCatalog extends TableCatalog {
   /**
    * Stage the creation of a table, preparing it to be committed into the metastore.
    * <p>
-   * This is deprecated. Please override
+   * @deprecated This is deprecated. Please override
    * {@link #stageCreate(Identifier, Column[], Transform[], Map)} instead.
    */
-  @Deprecated
+  @Deprecated(since = "3.4.0")
   StagedTable stageCreate(
       Identifier ident,
       StructType schema,

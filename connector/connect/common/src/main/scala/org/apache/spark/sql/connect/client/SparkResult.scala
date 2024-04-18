@@ -16,9 +16,11 @@
  */
 package org.apache.spark.sql.connect.client
 
+import java.lang.ref.Cleaner
 import java.util.Objects
 
 import scala.collection.mutable
+import scala.jdk.CollectionConverters._
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.arrow.vector.ipc.message.{ArrowMessage, ArrowRecordBatch}
@@ -28,7 +30,6 @@ import org.apache.spark.connect.proto
 import org.apache.spark.sql.catalyst.encoders.{AgnosticEncoder, RowEncoder}
 import org.apache.spark.sql.catalyst.encoders.AgnosticEncoders.{ProductEncoder, UnboundRowEncoder}
 import org.apache.spark.sql.connect.client.arrow.{AbstractMessageIterator, ArrowDeserializingIterator, ConcatenatingArrowStreamReader, MessageIterator}
-import org.apache.spark.sql.connect.client.util.Cleanable
 import org.apache.spark.sql.connect.common.DataTypeProtoConverter
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.sql.util.ArrowUtils
@@ -38,15 +39,48 @@ private[sql] class SparkResult[T](
     allocator: BufferAllocator,
     encoder: AgnosticEncoder[T],
     timeZoneId: String)
-    extends AutoCloseable
-    with Cleanable { self =>
+    extends AutoCloseable { self =>
 
+  case class StageInfo(
+      stageId: Long,
+      numTasks: Long,
+      completedTasks: Long = 0,
+      inputBytesRead: Long = 0,
+      completed: Boolean = false)
+
+  object StageInfo {
+    def apply(stageInfo: proto.ExecutePlanResponse.ExecutionProgress.StageInfo): StageInfo = {
+      StageInfo(
+        stageInfo.getStageId,
+        stageInfo.getNumTasks,
+        stageInfo.getNumCompletedTasks,
+        stageInfo.getInputBytesRead,
+        stageInfo.getDone)
+    }
+  }
+
+  object Progress {
+    def apply(progress: proto.ExecutePlanResponse.ExecutionProgress): Progress = {
+      Progress(
+        progress.getStagesList.asScala.map(StageInfo(_)).toSeq,
+        progress.getNumInflightTasks)
+    }
+  }
+
+  /**
+   * Progress of the query execution. This information can be accessed from the iterator.
+   */
+  case class Progress(stages: Seq[StageInfo], inflight: Long)
+
+  var progress: Progress = new Progress(Seq.empty, 0)
   private[this] var opId: String = _
   private[this] var numRecords: Int = 0
   private[this] var structType: StructType = _
   private[this] var arrowSchema: pojo.Schema = _
   private[this] var nextResultIndex: Int = 0
   private val resultMap = mutable.Map.empty[Int, (Long, Seq[ArrowMessage])]
+  private val cleanable =
+    SparkResult.cleaner.register(this, new SparkResultCloseable(resultMap, responses))
 
   /**
    * Update RowEncoder and recursively update the fields of the ProductEncoder if found.
@@ -96,6 +130,12 @@ private[sql] class SparkResult[T](
       }
       stop |= stopOnOperationId
 
+      // Update the execution status. This information can now be accessed directly from
+      // the iterator.
+      if (response.hasExecutionProgress) {
+        progress = Progress(response.getExecutionProgress)
+      }
+
       if (response.hasSchema) {
         // The original schema should arrive before ArrowBatches.
         structType =
@@ -104,6 +144,7 @@ private[sql] class SparkResult[T](
       }
       if (response.hasArrowBatch) {
         val ipcStreamBytes = response.getArrowBatch.getData
+        val expectedNumRows = response.getArrowBatch.getRowCount
         val reader = new MessageIterator(ipcStreamBytes.newInput(), allocator)
         if (arrowSchema == null) {
           arrowSchema = reader.schema
@@ -121,6 +162,14 @@ private[sql] class SparkResult[T](
           // If the schema is not available yet, fallback to the arrow schema.
           structType = ArrowUtils.fromArrowSchema(reader.schema)
         }
+        if (response.getArrowBatch.hasStartOffset) {
+          val expectedStartOffset = response.getArrowBatch.getStartOffset
+          if (numRecords != expectedStartOffset) {
+            throw new IllegalStateException(
+              s"Expected arrow batch to start at row offset $numRecords in results, " +
+                s"but received arrow batch starting at offset $expectedStartOffset.")
+          }
+        }
         var numRecordsInBatch = 0
         val messages = Seq.newBuilder[ArrowMessage]
         while (reader.hasNext) {
@@ -131,6 +180,10 @@ private[sql] class SparkResult[T](
             case _ =>
           }
           messages += message
+        }
+        if (numRecordsInBatch != expectedNumRows) {
+          throw new IllegalStateException(
+            s"Expected $expectedNumRows rows in arrow batch but got $numRecordsInBatch.")
         }
         // Skip the entire result if it is empty.
         if (numRecordsInBatch > 0) {
@@ -244,9 +297,7 @@ private[sql] class SparkResult[T](
   /**
    * Close this result, freeing any underlying resources.
    */
-  override def close(): Unit = cleaner.close()
-
-  override val cleaner: AutoCloseable = new SparkResultCloseable(resultMap, responses)
+  override def close(): Unit = cleanable.clean()
 
   private class ResultMessageIterator(destructive: Boolean) extends AbstractMessageIterator {
     private[this] var totalBytesRead = 0L
@@ -296,12 +347,21 @@ private[sql] class SparkResult[T](
   }
 }
 
+private object SparkResult {
+  private val cleaner: Cleaner = Cleaner.create()
+}
+
 private[client] class SparkResultCloseable(
     resultMap: mutable.Map[Int, (Long, Seq[ArrowMessage])],
     responses: CloseableIterator[proto.ExecutePlanResponse])
-    extends AutoCloseable {
+    extends AutoCloseable
+    with Runnable {
   override def close(): Unit = {
     resultMap.values.foreach(_._2.foreach(_.close()))
     responses.close()
+  }
+
+  override def run(): Unit = {
+    close()
   }
 }

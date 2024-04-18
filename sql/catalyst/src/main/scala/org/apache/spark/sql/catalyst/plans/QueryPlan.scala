@@ -67,7 +67,7 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
     // Propagate expressions' pattern bits
     val exprIterator = expressions.iterator
     while (exprIterator.hasNext) {
-      bits.union(exprIterator.next.treePatternBits)
+      bits.union(exprIterator.next().treePatternBits)
     }
     bits
   }
@@ -102,7 +102,13 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
   /**
    * Attributes that are referenced by expressions but not provided by this node's children.
    */
-  final def missingInput: AttributeSet = references -- inputSet
+  final def missingInput: AttributeSet = {
+    if (references.isEmpty) {
+      AttributeSet.empty
+    } else {
+      references -- inputSet
+    }
+  }
 
   /**
    * Runs [[transformExpressionsDown]] with `rule` on all expressions present
@@ -220,7 +226,7 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
       case Some(value) => Some(recursiveTransform(value))
       case m: Map[_, _] => m
       case d: DataType => d // Avoid unpacking Structs
-      case stream: Stream[_] => stream.map(recursiveTransform).force
+      case stream: LazyList[_] => stream.map(recursiveTransform).force
       case seq: Iterable[_] => seq.map(recursiveTransform)
       case other: AnyRef => other
       case null => null
@@ -245,7 +251,7 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
   def transformAllExpressionsWithSubqueries(
     rule: PartialFunction[Expression, Expression]): this.type = {
     transformWithSubqueries {
-      case q => q.transformExpressions(rule).asInstanceOf[PlanType]
+      case q => q.transformExpressions(rule)
     }.asInstanceOf[this.type]
   }
 
@@ -361,6 +367,9 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
         } else {
           transferAttrMapping ++ newOtherAttrMapping
         }
+        if (!(plan eq planAfterRule)) {
+          planAfterRule.copyTagsFrom(plan)
+        }
         planAfterRule -> resultAttrMapping.toSeq
       }
     }
@@ -371,7 +380,7 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
     transformExpressions {
       case a: AttributeReference =>
         updateAttr(a, attrMap)
-      case pe: PlanExpression[PlanType] =>
+      case pe: PlanExpression[PlanType @unchecked] =>
         pe.withNewPlan(updateOuterReferencesInSubquery(pe.plan, attrMap))
     }.asInstanceOf[PlanType]
   }
@@ -401,7 +410,7 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
       currentFragment.transformExpressions {
         case OuterReference(a: AttributeReference) =>
           OuterReference(updateAttr(a, attrMap))
-        case pe: PlanExpression[PlanType] =>
+        case pe: PlanExpression[PlanType @unchecked] =>
           pe.withNewPlan(updateOuterReferencesInSubquery(pe.plan, attrMap))
       }
     }
@@ -490,7 +499,7 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
   def transformUpWithSubqueries(f: PartialFunction[PlanType, PlanType]): PlanType = {
     transformUp { case plan =>
       val transformed = plan transformExpressionsUp {
-        case planExpression: PlanExpression[PlanType] =>
+        case planExpression: PlanExpression[PlanType @unchecked] =>
           val newPlan = planExpression.plan.transformUpWithSubqueries(f)
           planExpression.withNewPlan(newPlan)
       }
@@ -509,6 +518,30 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
   }
 
   /**
+   * Same as `transformUpWithSubqueries` except allows for pruning opportunities.
+   */
+  def transformUpWithSubqueriesAndPruning(
+    cond: TreePatternBits => Boolean,
+    ruleId: RuleId = UnknownRuleId)
+    (f: PartialFunction[PlanType, PlanType]): PlanType = {
+    val g: PartialFunction[PlanType, PlanType] = new PartialFunction[PlanType, PlanType] {
+      override def isDefinedAt(x: PlanType): Boolean = true
+
+      override def apply(plan: PlanType): PlanType = {
+        val transformed = plan.transformExpressionsUpWithPruning(t =>
+          t.containsPattern(PLAN_EXPRESSION) && cond(t)) {
+          case planExpression: PlanExpression[PlanType@unchecked] =>
+            val newPlan = planExpression.plan.transformUpWithSubqueriesAndPruning(cond, ruleId)(f)
+            planExpression.withNewPlan(newPlan)
+        }
+        f.applyOrElse[PlanType, PlanType](transformed, identity)
+      }
+    }
+
+    transformUpWithPruning(cond, ruleId)(g)
+  }
+
+  /**
    * This method is the top-down (pre-order) counterpart of transformUpWithSubqueries.
    * Returns a copy of this node where the given partial function has been recursively applied
    * first to this node, then this node's subqueries and finally this node's children.
@@ -524,7 +557,7 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
       override def apply(plan: PlanType): PlanType = {
         val transformed = f.applyOrElse[PlanType, PlanType](plan, identity)
         transformed transformExpressionsDown {
-          case planExpression: PlanExpression[PlanType] =>
+          case planExpression: PlanExpression[PlanType @unchecked] =>
             val newPlan = planExpression.plan.transformDownWithSubqueriesAndPruning(cond, ruleId)(f)
             planExpression.withNewPlan(newPlan)
         }
@@ -532,6 +565,17 @@ abstract class QueryPlan[PlanType <: QueryPlan[PlanType]]
     }
 
     transformDownWithPruning(cond, ruleId)(g)
+  }
+
+  /**
+   * A variant of [[foreach]] which considers plan nodes inside subqueries as well.
+   */
+  def foreachWithSubqueries(f: PlanType => Unit): Unit = {
+    def actualFunc(plan: PlanType): Unit = {
+      f(plan)
+      plan.subqueries.foreach(_.foreachWithSubqueries(f))
+    }
+    foreach(actualFunc)
   }
 
   /**

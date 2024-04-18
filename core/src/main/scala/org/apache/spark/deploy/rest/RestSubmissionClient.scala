@@ -21,7 +21,6 @@ import java.io.{DataOutputStream, FileNotFoundException}
 import java.net.{ConnectException, HttpURLConnection, SocketException, URL}
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeoutException
-import javax.servlet.http.HttpServletResponse
 
 import scala.collection.mutable
 import scala.concurrent.{Await, Future}
@@ -30,10 +29,12 @@ import scala.io.Source
 import scala.util.control.NonFatal
 
 import com.fasterxml.jackson.core.JsonProcessingException
+import jakarta.servlet.http.HttpServletResponse
 
 import org.apache.spark.{SPARK_VERSION => sparkVersion, SparkConf, SparkException}
 import org.apache.spark.deploy.SparkApplication
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.{CLASS_NAME, ERROR, SUBMISSION_ID}
 import org.apache.spark.util.Utils
 
 /**
@@ -118,6 +119,93 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
         response = post(url)
         response match {
           case k: KillSubmissionResponse =>
+            if (!Utils.responseFromBackup(k.message)) {
+              handleRestResponse(k)
+              handled = true
+            }
+          case unexpected =>
+            handleUnexpectedRestResponse(unexpected)
+        }
+      } catch {
+        case e: SubmitRestConnectionException =>
+          if (handleConnectionException(m)) {
+            throw new SubmitRestConnectionException("Unable to connect to server", e)
+          }
+      }
+    }
+    response
+  }
+
+  /** Request that the server kill all submissions. */
+  def killAllSubmissions(): SubmitRestProtocolResponse = {
+    logInfo(s"Submitting a request to kill all submissions in $master.")
+    var handled: Boolean = false
+    var response: SubmitRestProtocolResponse = null
+    for (m <- masters if !handled) {
+      validateMaster(m)
+      val url = getKillAllUrl(m)
+      try {
+        response = post(url)
+        response match {
+          case k: KillAllSubmissionResponse =>
+            if (!Utils.responseFromBackup(k.message)) {
+              handleRestResponse(k)
+              handled = true
+            }
+          case unexpected =>
+            handleUnexpectedRestResponse(unexpected)
+        }
+      } catch {
+        case e: SubmitRestConnectionException =>
+          if (handleConnectionException(m)) {
+            throw new SubmitRestConnectionException("Unable to connect to server", e)
+          }
+      }
+    }
+    response
+  }
+
+  /** Request that the server clears all submissions and applications. */
+  def clear(): SubmitRestProtocolResponse = {
+    logInfo(s"Submitting a request to clear $master.")
+    var handled: Boolean = false
+    var response: SubmitRestProtocolResponse = null
+    for (m <- masters if !handled) {
+      validateMaster(m)
+      val url = getClearUrl(m)
+      try {
+        response = post(url)
+        response match {
+          case k: ClearResponse =>
+            if (!Utils.responseFromBackup(k.message)) {
+              handleRestResponse(k)
+              handled = true
+            }
+          case unexpected =>
+            handleUnexpectedRestResponse(unexpected)
+        }
+      } catch {
+        case e: SubmitRestConnectionException =>
+          if (handleConnectionException(m)) {
+            throw new SubmitRestConnectionException("Unable to connect to server", e)
+          }
+      }
+    }
+    response
+  }
+
+  /** Check the readiness of Master. */
+  def readyz(): SubmitRestProtocolResponse = {
+    logInfo(s"Submitting a request to check the status of $master.")
+    var handled: Boolean = false
+    var response: SubmitRestProtocolResponse = new ErrorResponse
+    for (m <- masters if !handled) {
+      validateMaster(m)
+      val url = getReadyzUrl(m)
+      try {
+        response = get(url)
+        response match {
+          case k: ReadyzResponse =>
             if (!Utils.responseFromBackup(k.message)) {
               handleRestResponse(k)
               handled = true
@@ -242,7 +330,7 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
           !connection.getContentType().contains("application/json")) {
           throw new SubmitRestProtocolException(s"Server responded with exception:\n${errString}")
         }
-        logError(s"Server responded with error:\n${errString}")
+        logError(log"Server responded with error:\n${MDC(ERROR, errString)}")
         val error = new ErrorResponse
         if (responseCode == RestSubmissionServer.SC_UNKNOWN_PROTOCOL_VERSION) {
           error.highestProtocolVersion = RestSubmissionServer.PROTOCOL_VERSION
@@ -263,7 +351,7 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
         response match {
           // If the response is an error, log the message
           case error: ErrorResponse =>
-            logError(s"Server responded with error:\n${error.message}")
+            logError(log"Server responded with error:\n${MDC(ERROR, error.message)}")
             error
           // Otherwise, simply return the response
           case response: SubmitRestProtocolResponse => response
@@ -298,6 +386,24 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
   private def getKillUrl(master: String, submissionId: String): URL = {
     val baseUrl = getBaseUrl(master)
     new URL(s"$baseUrl/kill/$submissionId")
+  }
+
+  /** Return the REST URL for killing all submissions. */
+  private def getKillAllUrl(master: String): URL = {
+    val baseUrl = getBaseUrl(master)
+    new URL(s"$baseUrl/killall")
+  }
+
+  /** Return the REST URL for clear all existing submissions and applications. */
+  private def getClearUrl(master: String): URL = {
+    val baseUrl = getBaseUrl(master)
+    new URL(s"$baseUrl/clear")
+  }
+
+  /** Return the REST URL for requesting the readyz API. */
+  private def getReadyzUrl(master: String): URL = {
+    val baseUrl = getBaseUrl(master)
+    new URL(s"$baseUrl/readyz")
   }
 
   /** Return the REST URL for requesting the status of an existing submission. */
@@ -342,7 +448,7 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
       }
     } else {
       val failMessage = Option(submitResponse.message).map { ": " + _ }.getOrElse("")
-      logError(s"Application submission failed$failMessage")
+      logError(log"Application submission failed${MDC(ERROR, failMessage)}")
     }
   }
 
@@ -365,7 +471,8 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
         // Log driver state, if present
         driverState match {
           case Some(state) => logInfo(s"State of driver $submissionId is now $state.")
-          case _ => logError(s"State of driver $submissionId was not found!")
+          case _ =>
+            logError(log"State of driver ${MDC(SUBMISSION_ID, submissionId)} was not found!")
         }
         // Log worker node, if present
         (workerId, workerHostPort) match {
@@ -373,12 +480,12 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
           case _ =>
         }
         // Log exception stack trace, if present
-        exception.foreach { e => logError(e) }
+        exception.foreach { e => logError(log"${MDC(ERROR, e)}") }
         return
       }
       Thread.sleep(REPORT_DRIVER_STATUS_INTERVAL)
     }
-    logError(s"Error: Master did not recognize driver $submissionId.")
+    logError(log"Error: Master did not recognize driver ${MDC(SUBMISSION_ID, submissionId)}.")
   }
 
   /** Log the response sent by the server in the REST application submission protocol. */
@@ -388,7 +495,9 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
 
   /** Log an appropriate error if the response sent by the server is not of the expected type. */
   private def handleUnexpectedRestResponse(unexpected: SubmitRestProtocolResponse): Unit = {
-    logError(s"Error: Server responded with message of unexpected type ${unexpected.messageType}.")
+    // scalastyle:off line.size.limit
+    logError(log"Error: Server responded with message of unexpected type ${MDC(CLASS_NAME, unexpected.messageType)}.")
+    // scalastyle:on
   }
 
   /**
@@ -409,7 +518,7 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
 
 private[spark] object RestSubmissionClient {
 
-  val supportedMasterPrefixes = Seq("spark://", "mesos://")
+  val supportedMasterPrefixes = Seq("spark://")
 
   // SPARK_HOME and SPARK_CONF_DIR are filtered out because they are usually wrong
   // on the remote machine (SPARK-12345) (SPARK-25934)
@@ -422,9 +531,9 @@ private[spark] object RestSubmissionClient {
    * Filter non-spark environment variables from any environment.
    */
   private[rest] def filterSystemEnvironment(env: Map[String, String]): Map[String, String] = {
-    env.filterKeys { k =>
-      (k.startsWith("SPARK_") && !EXCLUDED_SPARK_ENV_VARS.contains(k)) || k.startsWith("MESOS_")
-    }.toMap
+    env.filter { case (k, _) =>
+      k.startsWith("SPARK_") && !EXCLUDED_SPARK_ENV_VARS.contains(k)
+    }
   }
 
   private[spark] def supportsRestClient(master: String): Boolean = {

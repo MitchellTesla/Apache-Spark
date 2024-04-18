@@ -30,7 +30,7 @@ import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.streaming.{GroupStateTimeout, OutputMode}
+import org.apache.spark.sql.streaming.{GroupStateTimeout, OutputMode, StatefulProcessor, TimeMode}
 import org.apache.spark.sql.types._
 
 object CatalystSerde {
@@ -401,13 +401,13 @@ case class AppendColumnsWithObject(
 /** Factory for constructing new `MapGroups` nodes. */
 object MapGroups {
   def apply[K : Encoder, T : Encoder, U : Encoder](
-      func: (K, Iterator[T]) => TraversableOnce[U],
+      func: (K, Iterator[T]) => IterableOnce[U],
       groupingAttributes: Seq[Attribute],
       dataAttributes: Seq[Attribute],
       dataOrder: Seq[SortOrder],
       child: LogicalPlan): LogicalPlan = {
     val mapped = new MapGroups(
-      func.asInstanceOf[(Any, Iterator[Any]) => TraversableOnce[Any]],
+      func.asInstanceOf[(Any, Iterator[Any]) => IterableOnce[Any]],
       UnresolvedDeserializer(encoderFor[K].deserializer, groupingAttributes),
       UnresolvedDeserializer(encoderFor[T].deserializer, dataAttributes),
       groupingAttributes,
@@ -436,7 +436,7 @@ object MapGroups {
  * @param valueDeserializer used to extract the items in the iterator from an input row.
  */
 case class MapGroups(
-    func: (Any, Iterator[Any]) => TraversableOnce[Any],
+    func: (Any, Iterator[Any]) => IterableOnce[Any],
     keyDeserializer: Expression,
     valueDeserializer: Expression,
     groupingAttributes: Seq[Attribute],
@@ -569,6 +569,94 @@ case class FlatMapGroupsWithState(
     copy(child = newLeft, initialState = newRight)
 }
 
+object TransformWithState {
+  def apply[K: Encoder, V: Encoder, U: Encoder](
+      groupingAttributes: Seq[Attribute],
+      dataAttributes: Seq[Attribute],
+      statefulProcessor: StatefulProcessor[K, V, U],
+      timeMode: TimeMode,
+      outputMode: OutputMode,
+      child: LogicalPlan): LogicalPlan = {
+    val keyEncoder = encoderFor[K]
+    val mapped = new TransformWithState(
+      UnresolvedDeserializer(encoderFor[K].deserializer, groupingAttributes),
+      UnresolvedDeserializer(encoderFor[V].deserializer, dataAttributes),
+      groupingAttributes,
+      dataAttributes,
+      statefulProcessor.asInstanceOf[StatefulProcessor[Any, Any, Any]],
+      timeMode,
+      outputMode,
+      keyEncoder.asInstanceOf[ExpressionEncoder[Any]],
+      CatalystSerde.generateObjAttr[U],
+      child,
+      hasInitialState = false,
+      // the following parameters will not be used in physical plan if hasInitialState = false
+      initialStateGroupingAttrs = groupingAttributes,
+      initialStateDataAttrs = dataAttributes,
+      initialStateDeserializer =
+        UnresolvedDeserializer(encoderFor[K].deserializer, groupingAttributes),
+      initialState = LocalRelation(encoderFor[K].schema) // empty data set
+    )
+    CatalystSerde.serialize[U](mapped)
+  }
+
+  // This apply() is to invoke TransformWithState object with hasInitialState set to true
+  def apply[K: Encoder, V: Encoder, U: Encoder, S: Encoder](
+      groupingAttributes: Seq[Attribute],
+      dataAttributes: Seq[Attribute],
+      statefulProcessor: StatefulProcessor[K, V, U],
+      timeMode: TimeMode,
+      outputMode: OutputMode,
+      child: LogicalPlan,
+      initialStateGroupingAttrs: Seq[Attribute],
+      initialStateDataAttrs: Seq[Attribute],
+      initialState: LogicalPlan): LogicalPlan = {
+    val keyEncoder = encoderFor[K]
+    val mapped = new TransformWithState(
+      UnresolvedDeserializer(encoderFor[K].deserializer, groupingAttributes),
+      UnresolvedDeserializer(encoderFor[V].deserializer, dataAttributes),
+      groupingAttributes,
+      dataAttributes,
+      statefulProcessor.asInstanceOf[StatefulProcessor[Any, Any, Any]],
+      timeMode,
+      outputMode,
+      keyEncoder.asInstanceOf[ExpressionEncoder[Any]],
+      CatalystSerde.generateObjAttr[U],
+      child,
+      hasInitialState = true,
+      initialStateGroupingAttrs,
+      initialStateDataAttrs,
+      UnresolvedDeserializer(encoderFor[S].deserializer, initialStateDataAttrs),
+      initialState
+    )
+    CatalystSerde.serialize[U](mapped)
+  }
+}
+
+case class TransformWithState(
+    keyDeserializer: Expression,
+    valueDeserializer: Expression,
+    groupingAttributes: Seq[Attribute],
+    dataAttributes: Seq[Attribute],
+    statefulProcessor: StatefulProcessor[Any, Any, Any],
+    timeMode: TimeMode,
+    outputMode: OutputMode,
+    keyEncoder: ExpressionEncoder[Any],
+    outputObjAttr: Attribute,
+    child: LogicalPlan,
+    hasInitialState: Boolean = false,
+    initialStateGroupingAttrs: Seq[Attribute],
+    initialStateDataAttrs: Seq[Attribute],
+    initialStateDeserializer: Expression,
+    initialState: LogicalPlan) extends BinaryNode with ObjectProducer {
+
+  override def left: LogicalPlan = child
+  override def right: LogicalPlan = initialState
+  override protected def withNewChildrenInternal(
+      newLeft: LogicalPlan, newRight: LogicalPlan): TransformWithState =
+    copy(child = newLeft, initialState = newRight)
+}
+
 /** Factory for constructing new `FlatMapGroupsInR` nodes. */
 object FlatMapGroupsInR {
   def apply(
@@ -662,7 +750,7 @@ case class FlatMapGroupsInRWithArrow(
 /** Factory for constructing new `CoGroup` nodes. */
 object CoGroup {
   def apply[K : Encoder, L : Encoder, R : Encoder, OUT : Encoder](
-      func: (K, Iterator[L], Iterator[R]) => TraversableOnce[OUT],
+      func: (K, Iterator[L], Iterator[R]) => IterableOnce[OUT],
       leftGroup: Seq[Attribute],
       rightGroup: Seq[Attribute],
       leftAttr: Seq[Attribute],
@@ -674,7 +762,7 @@ object CoGroup {
     require(DataTypeUtils.fromAttributes(leftGroup) == DataTypeUtils.fromAttributes(rightGroup))
 
     val cogrouped = CoGroup(
-      func.asInstanceOf[(Any, Iterator[Any], Iterator[Any]) => TraversableOnce[Any]],
+      func.asInstanceOf[(Any, Iterator[Any], Iterator[Any]) => IterableOnce[Any]],
       // The `leftGroup` and `rightGroup` are guaranteed te be of same schema, so it's safe to
       // resolve the `keyDeserializer` based on either of them, here we pick the left one.
       UnresolvedDeserializer(encoderFor[K].deserializer, leftGroup),
@@ -698,7 +786,7 @@ object CoGroup {
  * right children.
  */
 case class CoGroup(
-    func: (Any, Iterator[Any], Iterator[Any]) => TraversableOnce[Any],
+    func: (Any, Iterator[Any], Iterator[Any]) => IterableOnce[Any],
     keyDeserializer: Expression,
     leftDeserializer: Expression,
     rightDeserializer: Expression,
@@ -727,16 +815,20 @@ object JoinWith {
           if a.sameRef(b) =>
           catalyst.expressions.EqualTo(
             plan.left.resolveQuoted(a.name, resolver).getOrElse(
-              throw QueryCompilationErrors.resolveException(a.name, plan.left.schema.fieldNames)),
+              throw QueryCompilationErrors.unresolvedColumnError(
+                a.name, plan.left.schema.fieldNames)),
             plan.right.resolveQuoted(b.name, resolver).getOrElse(
-              throw QueryCompilationErrors.resolveException(b.name, plan.right.schema.fieldNames)))
+              throw QueryCompilationErrors.unresolvedColumnError(
+                b.name, plan.right.schema.fieldNames)))
         case catalyst.expressions.EqualNullSafe(a: AttributeReference, b: AttributeReference)
           if a.sameRef(b) =>
           catalyst.expressions.EqualNullSafe(
             plan.left.resolveQuoted(a.name, resolver).getOrElse(
-              throw QueryCompilationErrors.resolveException(a.name, plan.left.schema.fieldNames)),
+              throw QueryCompilationErrors.unresolvedColumnError(
+                a.name, plan.left.schema.fieldNames)),
             plan.right.resolveQuoted(b.name, resolver).getOrElse(
-              throw QueryCompilationErrors.resolveException(b.name, plan.right.schema.fieldNames)))
+              throw QueryCompilationErrors.unresolvedColumnError(
+                b.name, plan.right.schema.fieldNames)))
       }
     }
     plan.copy(condition = cond)

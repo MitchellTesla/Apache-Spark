@@ -25,8 +25,8 @@ import org.apache.spark.sql.{catalyst, AnalysisException, DataFrame, Row}
 import org.apache.spark.sql.catalyst.expressions.{ApplyFunctionExpression, Cast, Literal}
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.plans.physical
-import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, RangePartitioning, UnknownPartitioning}
-import org.apache.spark.sql.connector.catalog.Identifier
+import org.apache.spark.sql.catalyst.plans.physical.{CoalescedBoundary, CoalescedHashPartitioning, HashPartitioning, RangePartitioning, UnknownPartitioning}
+import org.apache.spark.sql.connector.catalog.{Column, Identifier}
 import org.apache.spark.sql.connector.catalog.functions._
 import org.apache.spark.sql.connector.distributions.{Distribution, Distributions}
 import org.apache.spark.sql.connector.expressions._
@@ -40,7 +40,7 @@ import org.apache.spark.sql.execution.streaming.sources.ContinuousMemoryStream
 import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.streaming.{StreamingQueryException, Trigger}
-import org.apache.spark.sql.types.{DateType, IntegerType, LongType, ObjectType, StringType, StructType, TimestampType}
+import org.apache.spark.sql.types.{DateType, IntegerType, LongType, ObjectType, StringType, TimestampType}
 import org.apache.spark.sql.util.QueryExecutionListener
 import org.apache.spark.tags.SlowSQLTest
 
@@ -69,10 +69,10 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
   private val ident = Identifier.of(namespace, "test_table")
   private val tableNameAsString = "testcat." + ident.toString
   private val emptyProps = Collections.emptyMap[String, String]
-  private val schema = new StructType()
-    .add("id", IntegerType)
-    .add("data", StringType)
-    .add("day", DateType)
+  private val columns = Array(
+    Column.create("id", IntegerType),
+    Column.create("data", StringType),
+    Column.create("day", DateType))
 
   test("ordered distribution and sort with same exprs: append") {
     checkOrderedDistributionAndSortWithSameExprsInVariousCases("append")
@@ -264,11 +264,8 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
       )
     )
     val writePartitioningExprs = Seq(attr("data"), attr("id"))
-    val writePartitioning = if (!coalesce) {
-      clusteredWritePartitioning(writePartitioningExprs, targetNumPartitions)
-    } else {
-      clusteredWritePartitioning(writePartitioningExprs, Some(1))
-    }
+    val writePartitioning = clusteredWritePartitioning(
+      writePartitioningExprs, targetNumPartitions, coalesce)
 
     checkWriteRequirements(
       tableDistribution,
@@ -377,11 +374,8 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
       )
     )
     val writePartitioningExprs = Seq(attr("data"))
-    val writePartitioning = if (!coalesce) {
-      clusteredWritePartitioning(writePartitioningExprs, targetNumPartitions)
-    } else {
-      clusteredWritePartitioning(writePartitioningExprs, Some(1))
-    }
+    val writePartitioning = clusteredWritePartitioning(
+      writePartitioningExprs, targetNumPartitions, coalesce)
 
     checkWriteRequirements(
       tableDistribution,
@@ -875,11 +869,8 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
       )
     )
     val writePartitioningExprs = Seq(attr("data"))
-    val writePartitioning = if (!coalesce) {
-      clusteredWritePartitioning(writePartitioningExprs, targetNumPartitions)
-    } else {
-      clusteredWritePartitioning(writePartitioningExprs, Some(1))
-    }
+    val writePartitioning = clusteredWritePartitioning(
+      writePartitioningExprs, targetNumPartitions, coalesce)
 
     checkWriteRequirements(
       tableDistribution,
@@ -963,11 +954,8 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
       )
     )
     val writePartitioningExprs = Seq(attr("data"))
-    val writePartitioning = if (!coalesce) {
-      clusteredWritePartitioning(writePartitioningExprs, targetNumPartitions)
-    } else {
-      clusteredWritePartitioning(writePartitioningExprs, Some(1))
-    }
+    val writePartitioning = clusteredWritePartitioning(
+      writePartitioningExprs, targetNumPartitions, coalesce)
 
     checkWriteRequirements(
       tableDistribution,
@@ -989,7 +977,7 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
     )
     val distribution = Distributions.ordered(ordering)
 
-    catalog.createTable(ident, schema, Array.empty, emptyProps, distribution, ordering, None, None)
+    catalog.createTable(ident, columns, Array.empty, emptyProps, distribution, ordering, None, None)
 
     withTempDir { checkpointDir =>
       val inputData = ContinuousMemoryStream[(Long, String, Date)]
@@ -1017,7 +1005,7 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
   }
 
   test("continuous mode allows unspecified distribution and empty ordering") {
-    catalog.createTable(ident, schema, Array.empty[Transform], emptyProps)
+    catalog.createTable(ident, columns, Array.empty[Transform], emptyProps)
 
     withTempDir { checkpointDir =>
       val inputData = ContinuousMemoryStream[(Long, String, Date)]
@@ -1154,11 +1142,8 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
     )
 
     val writePartitioningExprs = Seq(truncateExpr)
-    val writePartitioning = if (!coalesce) {
-      clusteredWritePartitioning(writePartitioningExprs, targetNumPartitions)
-    } else {
-      clusteredWritePartitioning(writePartitioningExprs, Some(1))
-    }
+    val writePartitioning = clusteredWritePartitioning(
+      writePartitioningExprs, targetNumPartitions, coalesce)
 
     checkWriteRequirements(
       tableDistribution,
@@ -1232,9 +1217,8 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
       coalesce: Boolean = false): Unit = {
     // scalastyle:on argcount
 
-    catalog.createTable(ident, schema, Array.empty, emptyProps, tableDistribution,
-      tableOrdering, tableNumPartitions, tablePartitionSize,
-      distributionStrictlyRequired)
+    catalog.createTable(ident, columns, Array.empty, emptyProps, tableDistribution,
+      tableOrdering, tableNumPartitions, tablePartitionSize, distributionStrictlyRequired)
 
     val df = if (!dataSkewed) {
       spark.createDataFrame(Seq(
@@ -1335,7 +1319,7 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
       outputMode: String = "append",
       expectAnalysisException: Boolean = false): Unit = {
 
-    catalog.createTable(ident, schema, Array.empty, emptyProps, tableDistribution,
+    catalog.createTable(ident, columns, Array.empty, emptyProps, tableDistribution,
       tableOrdering, tableNumPartitions, tablePartitionSize)
 
     withTempDir { checkpointDir =>
@@ -1422,6 +1406,9 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
       case p: physical.HashPartitioning =>
         val resolvedExprs = p.expressions.map(resolveAttrs(_, plan))
         p.copy(expressions = resolvedExprs)
+      case c: physical.CoalescedHashPartitioning =>
+        val resolvedExprs = c.from.expressions.map(resolveAttrs(_, plan))
+        c.copy(from = c.from.copy(expressions = resolvedExprs))
       case _: UnknownPartitioning =>
         // don't check partitioning if no particular one is expected
         actualPartitioning
@@ -1480,9 +1467,16 @@ class WriteDistributionAndOrderingSuite extends DistributionAndOrderingSuiteBase
 
   private def clusteredWritePartitioning(
       writePartitioningExprs: Seq[catalyst.expressions.Expression],
-      targetNumPartitions: Option[Int]): physical.Partitioning = {
-    HashPartitioning(writePartitioningExprs,
-      targetNumPartitions.getOrElse(conf.numShufflePartitions))
+      targetNumPartitions: Option[Int],
+      coalesce: Boolean): physical.Partitioning = {
+    val partitioning = HashPartitioning(writePartitioningExprs,
+        targetNumPartitions.getOrElse(conf.numShufflePartitions))
+    if (coalesce)  {
+      CoalescedHashPartitioning(
+        partitioning, Seq(CoalescedBoundary(0, partitioning.numPartitions)))
+    } else {
+      partitioning
+    }
   }
 
   private def partitionSizes(dataSkew: Boolean, coalesce: Boolean): Seq[Option[Long]] = {

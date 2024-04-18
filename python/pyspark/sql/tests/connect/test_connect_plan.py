@@ -330,10 +330,18 @@ class SparkConnectPlanTests(PlanOnlyTestFixture):
             "id",
         )
 
-        from pyspark.sql.observation import Observation
+        from pyspark.sql.connect.observation import Observation
+
+        class MockDF(DataFrame):
+            def __init__(self, df: DataFrame):
+                super().__init__(df._plan, df._session)
+
+            @property
+            def isStreaming(self) -> bool:
+                return False
 
         plan = (
-            df.filter(df.col_name > 3)
+            MockDF(df.filter(df.col_name > 3))
             .observe(Observation("my_metric"), min("id"), max("id"), sum("id"))
             ._plan.to_proto(self.connect)
         )
@@ -748,7 +756,7 @@ class SparkConnectPlanTests(PlanOnlyTestFixture):
         # SPARK-41717: test print
         self.assertEqual(
             self.connect.sql("SELECT 1")._plan.print().strip(),
-            "<SQL query='SELECT 1', args='None'>",
+            "<SQL query='SELECT 1', args='None', named_args='None', views='None'>",
         )
         self.assertEqual(
             self.connect.range(1, 10)._plan.print().strip(),
@@ -782,7 +790,7 @@ class SparkConnectPlanTests(PlanOnlyTestFixture):
     def test_join_with_join_type(self):
         df_left = self.connect.with_plan(Read("table"))
         df_right = self.connect.with_plan(Read("table"))
-        for (join_type_str, join_type) in [
+        for join_type_str, join_type in [
             (None, proto.Join.JoinType.JOIN_TYPE_INNER),
             ("inner", proto.Join.JoinType.JOIN_TYPE_INNER),
             ("outer", proto.Join.JoinType.JOIN_TYPE_FULL_OUTER),
@@ -844,7 +852,6 @@ class SparkConnectPlanTests(PlanOnlyTestFixture):
         self.assertEqual(bin_lit_p.literal.binary, val)
 
     def test_uuid_literal(self):
-
         val = uuid.uuid4()
         with self.assertRaises(TypeError):
             lit(val)

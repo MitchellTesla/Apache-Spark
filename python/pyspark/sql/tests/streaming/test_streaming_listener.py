@@ -39,16 +39,16 @@ class StreamingListenerTestsMixin:
         self.assertTrue(isinstance(event, QueryStartedEvent))
         self.assertTrue(isinstance(event.id, uuid.UUID))
         self.assertTrue(isinstance(event.runId, uuid.UUID))
-        self.assertTrue(event.name is None or event.name == "test")
+        self.assertTrue(event.name is None or event.name.startswith("test"))
         try:
             datetime.strptime(event.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
         except ValueError:
             self.fail("'%s' is not in ISO 8601 format.")
 
-    def check_progress_event(self, event):
+    def check_progress_event(self, event, is_stateful):
         """Check QueryProgressEvent"""
         self.assertTrue(isinstance(event, QueryProgressEvent))
-        self.check_streaming_query_progress(event.progress)
+        self.check_streaming_query_progress(event.progress, is_stateful)
 
     def check_terminated_event(self, event, exception=None, error_class=None):
         """Check QueryTerminatedEvent"""
@@ -58,19 +58,19 @@ class StreamingListenerTestsMixin:
         if exception:
             self.assertTrue(exception in event.exception)
         else:
-            self.assertEquals(event.exception, None)
+            self.assertEqual(event.exception, None)
 
         if error_class:
             self.assertTrue(error_class in event.errorClassOnException)
         else:
-            self.assertEquals(event.errorClassOnException, None)
+            self.assertEqual(event.errorClassOnException, None)
 
-    def check_streaming_query_progress(self, progress):
+    def check_streaming_query_progress(self, progress, is_stateful):
         """Check StreamingQueryProgress"""
         self.assertTrue(isinstance(progress, StreamingQueryProgress))
         self.assertTrue(isinstance(progress.id, uuid.UUID))
         self.assertTrue(isinstance(progress.runId, uuid.UUID))
-        self.assertEquals(progress.name, "test")
+        self.assertTrue(progress.name.startswith("test"))
         try:
             json.loads(progress.json)
         except Exception:
@@ -108,9 +108,10 @@ class StreamingListenerTestsMixin:
         self.assertTrue(all(map(lambda v: isinstance(v, str), progress.eventTime.values())))
 
         self.assertTrue(isinstance(progress.stateOperators, list))
-        self.assertTrue(len(progress.stateOperators) >= 1)
-        for so in progress.stateOperators:
-            self.check_state_operator_progress(so)
+        if is_stateful:
+            self.assertTrue(len(progress.stateOperators) >= 1)
+            for so in progress.stateOperators:
+                self.check_state_operator_progress(so)
 
         self.assertTrue(isinstance(progress.sources, list))
         self.assertTrue(len(progress.sources) >= 1)
@@ -208,41 +209,41 @@ class StreamingListenerTests(StreamingListenerTestsMixin, ReusedSQLTestCase):
                 ).getMethods()
             )
 
-        self.assertEquals(
+        self.assertEqual(
             get_number_of_public_methods(
                 "org.apache.spark.sql.streaming.StreamingQueryListener$QueryStartedEvent"
             ),
             15,
             msg,
         )
-        self.assertEquals(
+        self.assertEqual(
             get_number_of_public_methods(
                 "org.apache.spark.sql.streaming.StreamingQueryListener$QueryProgressEvent"
             ),
             12,
             msg,
         )
-        self.assertEquals(
+        self.assertEqual(
             get_number_of_public_methods(
                 "org.apache.spark.sql.streaming.StreamingQueryListener$QueryTerminatedEvent"
             ),
             15,
             msg,
         )
-        self.assertEquals(
+        self.assertEqual(
             get_number_of_public_methods("org.apache.spark.sql.streaming.StreamingQueryProgress"),
             38,
             msg,
         )
-        self.assertEquals(
+        self.assertEqual(
             get_number_of_public_methods("org.apache.spark.sql.streaming.StateOperatorProgress"),
             27,
             msg,
         )
-        self.assertEquals(
+        self.assertEqual(
             get_number_of_public_methods("org.apache.spark.sql.streaming.SourceProgress"), 21, msg
         )
-        self.assertEquals(
+        self.assertEqual(
             get_number_of_public_methods("org.apache.spark.sql.streaming.SinkProgress"), 19, msg
         )
 
@@ -251,7 +252,23 @@ class StreamingListenerTests(StreamingListenerTestsMixin, ReusedSQLTestCase):
         progress_event = None
         terminated_event = None
 
-        class TestListener(StreamingQueryListener):
+        # V1: Initial interface of StreamingQueryListener containing methods `onQueryStarted`,
+        # `onQueryProgress`, `onQueryTerminated`. It is prior to Spark 3.5.
+        class TestListenerV1(StreamingQueryListener):
+            def onQueryStarted(self, event):
+                nonlocal start_event
+                start_event = event
+
+            def onQueryProgress(self, event):
+                nonlocal progress_event
+                progress_event = event
+
+            def onQueryTerminated(self, event):
+                nonlocal terminated_event
+                terminated_event = event
+
+        # V2: The interface after the method `onQueryIdle` is added. It is Spark 3.5+.
+        class TestListenerV2(StreamingQueryListener):
             def onQueryStarted(self, event):
                 nonlocal start_event
                 start_event = event
@@ -267,48 +284,71 @@ class StreamingListenerTests(StreamingListenerTestsMixin, ReusedSQLTestCase):
                 nonlocal terminated_event
                 terminated_event = event
 
-        test_listener = TestListener()
+        def verify(test_listener):
+            nonlocal start_event
+            nonlocal progress_event
+            nonlocal terminated_event
 
-        try:
-            self.spark.streams.addListener(test_listener)
+            start_event = None
+            progress_event = None
+            terminated_event = None
 
-            df = self.spark.readStream.format("rate").option("rowsPerSecond", 10).load()
+            try:
+                self.spark.streams.addListener(test_listener)
 
-            # check successful stateful query
-            df_stateful = df.groupBy().count()  # make query stateful
-            q = (
-                df_stateful.writeStream.format("noop")
-                .queryName("test")
-                .outputMode("complete")
-                .start()
-            )
-            self.assertTrue(q.isActive)
-            time.sleep(10)
-            q.stop()
+                df = self.spark.readStream.format("rate").option("rowsPerSecond", 10).load()
 
-            # Make sure all events are empty
-            self.spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty()
+                # check successful stateful query
+                df_stateful = df.groupBy().count()  # make query stateful
+                q = (
+                    df_stateful.writeStream.format("noop")
+                    .queryName("test")
+                    .outputMode("complete")
+                    .start()
+                )
+                self.assertTrue(q.isActive)
+                time.sleep(10)
+                q.stop()
 
-            self.check_start_event(start_event)
-            self.check_progress_event(progress_event)
-            self.check_terminated_event(terminated_event)
+                # Make sure all events are empty
+                self.spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty()
 
-            # Check query terminated with exception
-            from pyspark.sql.functions import col, udf
+                self.check_start_event(start_event)
+                self.check_progress_event(progress_event, True)
+                self.check_terminated_event(terminated_event)
 
-            bad_udf = udf(lambda x: 1 / 0)
-            q = df.select(bad_udf(col("value"))).writeStream.format("noop").start()
-            time.sleep(5)
-            q.stop()
-            self.spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty()
-            self.check_terminated_event(terminated_event, "ZeroDivisionError")
+                # Check query terminated with exception
+                from pyspark.sql.functions import col, udf
 
-        finally:
-            self.spark.streams.removeListener(test_listener)
+                bad_udf = udf(lambda x: 1 / 0)
+                q = df.select(bad_udf(col("value"))).writeStream.format("noop").start()
+                time.sleep(5)
+                q.stop()
+                self.spark.sparkContext._jsc.sc().listenerBus().waitUntilEmpty()
+                self.check_terminated_event(terminated_event, "ZeroDivisionError")
+
+            finally:
+                self.spark.streams.removeListener(test_listener)
+
+        verify(TestListenerV1())
+        verify(TestListenerV2())
 
     def test_remove_listener(self):
         # SPARK-38804: Test StreamingQueryManager.removeListener
-        class TestListener(StreamingQueryListener):
+        # V1: Initial interface of StreamingQueryListener containing methods `onQueryStarted`,
+        # `onQueryProgress`, `onQueryTerminated`. It is prior to Spark 3.5.
+        class TestListenerV1(StreamingQueryListener):
+            def onQueryStarted(self, event):
+                pass
+
+            def onQueryProgress(self, event):
+                pass
+
+            def onQueryTerminated(self, event):
+                pass
+
+        # V2: The interface after the method `onQueryIdle` is added. It is Spark 3.5+.
+        class TestListenerV2(StreamingQueryListener):
             def onQueryStarted(self, event):
                 pass
 
@@ -321,13 +361,15 @@ class StreamingListenerTests(StreamingListenerTestsMixin, ReusedSQLTestCase):
             def onQueryTerminated(self, event):
                 pass
 
-        test_listener = TestListener()
+        def verify(test_listener):
+            num_listeners = len(self.spark.streams._jsqm.listListeners())
+            self.spark.streams.addListener(test_listener)
+            self.assertEqual(num_listeners + 1, len(self.spark.streams._jsqm.listListeners()))
+            self.spark.streams.removeListener(test_listener)
+            self.assertEqual(num_listeners, len(self.spark.streams._jsqm.listListeners()))
 
-        num_listeners = len(self.spark.streams._jsqm.listListeners())
-        self.spark.streams.addListener(test_listener)
-        self.assertEqual(num_listeners + 1, len(self.spark.streams._jsqm.listListeners()))
-        self.spark.streams.removeListener(test_listener)
-        self.assertEqual(num_listeners, len(self.spark.streams._jsqm.listListeners()))
+        verify(TestListenerV1())
+        verify(TestListenerV2())
 
     def test_query_started_event_fromJson(self):
         start_event = """
@@ -429,7 +471,7 @@ class StreamingListenerTests(StreamingListenerTestsMixin, ReusedSQLTestCase):
         """
         progress = StreamingQueryProgress.fromJson(json.loads(progress_json))
 
-        self.check_streaming_query_progress(progress)
+        self.check_streaming_query_progress(progress, True)
 
         # checks for progress
         self.assertEqual(progress.id, uuid.UUID("00000000-0000-0001-0000-000000000001"))

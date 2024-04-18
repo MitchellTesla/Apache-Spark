@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 import io.grpc.inprocess.InProcessChannelBuilder
 import org.apache.arrow.memory.RootAllocator
-import org.apache.commons.lang3.{JavaVersion, SystemUtils}
+import org.apache.commons.lang3.SystemUtils
 import org.scalatest.BeforeAndAfterAll
 
 import org.apache.spark.sql.connect.client.SparkConnectClient
@@ -39,8 +39,7 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
   override protected def beforeAll(): Unit = {
     super.beforeAll()
     val client = SparkConnectClient(InProcessChannelBuilder.forName("/dev/null").build())
-    session =
-      new SparkSession(client, cleaner = SparkSession.cleaner, planIdGenerator = new AtomicLong)
+    session = new SparkSession(client, planIdGenerator = new AtomicLong)
   }
 
   test("column resolution") {
@@ -48,11 +47,12 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     import spark.implicits._
     def assertEqual(left: Column, right: Column): Unit = assert(left == right)
     assertEqual($"x", Column("x"))
-    assertEqual('y, Column("y"))
+    assertEqual(Symbol("y"), Column("y"))
   }
 
   test("test implicit encoder resolution") {
     val spark = session
+    import org.apache.spark.util.ArrayImplicits._
     import spark.implicits._
     def testImplicit[T: Encoder](expected: T): Unit = {
       val encoder = encoderFor[T]
@@ -85,6 +85,7 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     testImplicit(booleans)
     testImplicit(booleans.toSeq)
     testImplicit(booleans.toSeq)(newBooleanSeqEncoder)
+    testImplicit(booleans.toImmutableArraySeq)
 
     val bytes = Array(76.toByte, 59.toByte, 121.toByte)
     testImplicit(bytes.head)
@@ -92,6 +93,7 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     testImplicit(bytes)
     testImplicit(bytes.toSeq)
     testImplicit(bytes.toSeq)(newByteSeqEncoder)
+    testImplicit(bytes.toImmutableArraySeq)
 
     val shorts = Array(21.toShort, (-213).toShort, 14876.toShort)
     testImplicit(shorts.head)
@@ -99,6 +101,7 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     testImplicit(shorts)
     testImplicit(shorts.toSeq)
     testImplicit(shorts.toSeq)(newShortSeqEncoder)
+    testImplicit(shorts.toImmutableArraySeq)
 
     val ints = Array(4, 6, 5)
     testImplicit(ints.head)
@@ -106,6 +109,7 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     testImplicit(ints)
     testImplicit(ints.toSeq)
     testImplicit(ints.toSeq)(newIntSeqEncoder)
+    testImplicit(ints.toImmutableArraySeq)
 
     val longs = Array(System.nanoTime(), System.currentTimeMillis())
     testImplicit(longs.head)
@@ -113,6 +117,7 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     testImplicit(longs)
     testImplicit(longs.toSeq)
     testImplicit(longs.toSeq)(newLongSeqEncoder)
+    testImplicit(longs.toImmutableArraySeq)
 
     val floats = Array(3f, 10.9f)
     testImplicit(floats.head)
@@ -120,6 +125,7 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     testImplicit(floats)
     testImplicit(floats.toSeq)
     testImplicit(floats.toSeq)(newFloatSeqEncoder)
+    testImplicit(floats.toImmutableArraySeq)
 
     val doubles = Array(23.78d, -329.6d)
     testImplicit(doubles.head)
@@ -127,32 +133,35 @@ class SQLImplicitsTestSuite extends ConnectFunSuite with BeforeAndAfterAll {
     testImplicit(doubles)
     testImplicit(doubles.toSeq)
     testImplicit(doubles.toSeq)(newDoubleSeqEncoder)
+    testImplicit(doubles.toImmutableArraySeq)
 
     val strings = Array("foo", "baz", "bar")
     testImplicit(strings.head)
     testImplicit(strings)
     testImplicit(strings.toSeq)
     testImplicit(strings.toSeq)(newStringSeqEncoder)
+    testImplicit(strings.toImmutableArraySeq)
 
     val myTypes = Array(MyType(12L, Math.E, Math.PI), MyType(0, 0, 0))
     testImplicit(myTypes.head)
     testImplicit(myTypes)
     testImplicit(myTypes.toSeq)
     testImplicit(myTypes.toSeq)(newProductSeqEncoder[MyType])
+    testImplicit(myTypes.toImmutableArraySeq)
 
     // Others.
     val decimal = java.math.BigDecimal.valueOf(3141527000000000000L, 18)
     testImplicit(decimal)
+    testImplicit(Array(decimal).toImmutableArraySeq)
     testImplicit(BigDecimal(decimal))
     testImplicit(Date.valueOf(LocalDate.now()))
     testImplicit(LocalDate.now())
-    // SPARK-42770: Run `LocalDateTime.now()` and `Instant.now()` with Java 8 & 11 always
-    // get microseconds on both Linux and MacOS, but there are some differences when
-    // using Java 17, it will get accurate nanoseconds on Linux, but still get the microseconds
-    // on MacOS. At present, Spark always converts them to microseconds, this will cause the
+    // SPARK-42770: `LocalDateTime.now()` and `Instant.now()` it will get accurate
+    // nanoseconds on Linux, but get the microseconds on MacOS. At present,
+    // Spark always converts them to microseconds, this will cause the
     // test fail when using Java 17 on Linux, so add `truncatedTo(ChronoUnit.MICROS)` when
     // testing on Linux using Java 17 to ensure the accuracy of input data is microseconds.
-    if (SystemUtils.isJavaVersionAtLeast(JavaVersion.JAVA_17) && SystemUtils.IS_OS_LINUX) {
+    if (SystemUtils.IS_OS_LINUX) {
       testImplicit(LocalDateTime.now().truncatedTo(ChronoUnit.MICROS))
       testImplicit(Instant.now().truncatedTo(ChronoUnit.MICROS))
       testImplicit(Timestamp.from(Instant.now().truncatedTo(ChronoUnit.MICROS)))

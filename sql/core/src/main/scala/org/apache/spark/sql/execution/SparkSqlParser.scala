@@ -19,13 +19,13 @@ package org.apache.spark.sql.execution
 
 import java.time.ZoneOffset
 import java.util.{Locale, TimeZone}
-import javax.ws.rs.core.UriBuilder
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.antlr.v4.runtime.{ParserRuleContext, Token}
 import org.antlr.v4.runtime.tree.TerminalNode
 
+import org.apache.spark.SparkException
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.{GlobalTempView, LocalTempView, PersistedView, UnresolvedFunctionName, UnresolvedIdentifier}
 import org.apache.spark.sql.catalyst.catalog._
@@ -41,6 +41,7 @@ import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.internal.{HiveSerDe, SQLConf, VariableSubstitution}
 import org.apache.spark.sql.internal.StaticSQLConf.CATALOG_IMPLEMENTATION
 import org.apache.spark.sql.types.StringType
+import org.apache.spark.util.Utils.getUriBuilder
 
 /**
  * Concrete parser for Spark SQL statements.
@@ -142,6 +143,21 @@ class SparkSqlAstBuilder extends AstBuilder {
   }
 
   /**
+   * Create a [[SetCommand]] logical plan to set [[SQLConf.DEFAULT_COLLATION]]
+   * Example SQL :
+   * {{{
+   *   SET COLLATION UNICODE;
+   * }}}
+   */
+  override def visitSetCollation(ctx: SetCollationContext): LogicalPlan = withOrigin(ctx) {
+    if (!SQLConf.get.collationEnabled) {
+      throw QueryCompilationErrors.collationNotEnabledError()
+    }
+    val key = SQLConf.DEFAULT_COLLATION.key
+    SetCommand(Some(key -> Some(ctx.identifier.getText.toUpperCase(Locale.ROOT))))
+  }
+
+  /**
    * Create a [[SetCommand]] logical plan to set [[SQLConf.SESSION_LOCAL_TIMEZONE]]
    * Example SQL :
    * {{{
@@ -219,7 +235,7 @@ class SparkSqlAstBuilder extends AstBuilder {
    */
   override def visitExplain(ctx: ExplainContext): LogicalPlan = withOrigin(ctx) {
     if (ctx.LOGICAL != null) {
-      operationNotAllowed("EXPLAIN LOGICAL", ctx)
+      invalidStatement("EXPLAIN LOGICAL", ctx)
     }
 
     val statement = plan(ctx.statement)
@@ -264,12 +280,12 @@ class SparkSqlAstBuilder extends AstBuilder {
    * Create a [[SetCatalogCommand]] logical command.
    */
   override def visitSetCatalog(ctx: SetCatalogContext): LogicalPlan = withOrigin(ctx) {
-    if (ctx.identifier() != null) {
-      SetCatalogCommand(ctx.identifier().getText)
+    if (ctx.errorCapturingIdentifier() != null) {
+      SetCatalogCommand(ctx.errorCapturingIdentifier().getText)
     } else if (ctx.stringLit() != null) {
       SetCatalogCommand(string(visitStringLit(ctx.stringLit())))
     } else {
-      throw new IllegalStateException("Invalid catalog name")
+      throw SparkException.internalError("Invalid catalog name")
     }
   }
 
@@ -315,15 +331,16 @@ class SparkSqlAstBuilder extends AstBuilder {
       super.visitCreateTable(ctx)
     } else {
       if (external) {
-        operationNotAllowed("CREATE EXTERNAL TABLE ... USING", ctx)
+        invalidStatement("CREATE EXTERNAL TABLE ... USING", ctx)
       }
       if (ifNotExists) {
         // Unlike CREATE TEMPORARY VIEW USING, CREATE TEMPORARY TABLE USING does not support
         // IF NOT EXISTS. Users are not allowed to replace the existing temp table.
-        operationNotAllowed("CREATE TEMPORARY TABLE IF NOT EXISTS", ctx)
+        invalidStatement("CREATE TEMPORARY TABLE IF NOT EXISTS", ctx)
       }
 
-      val (_, _, _, _, options, location, _, _) = visitCreateTableClauses(ctx.createTableClauses())
+      val (_, _, _, _, options, location, _, _, _) =
+        visitCreateTableClauses(ctx.createTableClauses())
       val provider = Option(ctx.tableProvider).map(_.multipartIdentifier.getText).getOrElse(
         throw QueryParsingErrors.createTempTableNotSpecifyProviderError(ctx))
       val schema = Option(ctx.createOrReplaceTableColTypeList()).map(createSchema)
@@ -394,7 +411,7 @@ class SparkSqlAstBuilder extends AstBuilder {
       // SET ROLE is the exception to the rule, because we handle this before other SET commands.
       "SET ROLE"
     }
-    operationNotAllowed(keywords, ctx)
+    invalidStatement(keywords, ctx)
   }
 
   /**
@@ -487,7 +504,7 @@ class SparkSqlAstBuilder extends AstBuilder {
    */
   override def visitCreateView(ctx: CreateViewContext): LogicalPlan = withOrigin(ctx) {
     if (!ctx.identifierList.isEmpty) {
-      operationNotAllowed("CREATE VIEW ... PARTITIONED ON", ctx)
+      invalidStatement("CREATE VIEW ... PARTITIONED ON", ctx)
     }
 
     checkDuplicateClauses(ctx.commentSpec(), "COMMENT", ctx)
@@ -716,7 +733,7 @@ class SparkSqlAstBuilder extends AstBuilder {
     val serdeInfo = getSerdeInfo(
       ctx.rowFormat.asScala.toSeq, ctx.createFileFormat.asScala.toSeq, ctx)
     if (provider.isDefined && serdeInfo.isDefined) {
-      operationNotAllowed(s"CREATE TABLE LIKE ... USING ... ${serdeInfo.get.describe}", ctx)
+      invalidStatement(s"CREATE TABLE LIKE ... USING ... ${serdeInfo.get.describe}", ctx)
     }
 
     // For "CREATE TABLE dst LIKE src ROW FORMAT SERDE xxx" which doesn't specify the file format,
@@ -860,7 +877,7 @@ class SparkSqlAstBuilder extends AstBuilder {
           throw QueryParsingErrors.unsupportedLocalFileSchemeError(ctx, pathScheme)
         case _ =>
           // force scheme to be file rather than fs.default.name
-          val loc = Some(UriBuilder.fromUri(CatalogUtils.stringToURI(path)).scheme("file").build())
+          val loc = Some(getUriBuilder(CatalogUtils.stringToURI(path)).scheme("file").build())
           storage = storage.copy(locationUri = loc)
       }
     }

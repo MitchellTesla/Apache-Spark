@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.execution.datasources.csv
 
+import java.io.{FileNotFoundException, IOException}
 import java.nio.charset.{Charset, StandardCharsets}
 
 import com.univocity.parsers.csv.CsvParser
@@ -27,7 +28,8 @@ import org.apache.hadoop.mapreduce.lib.input.FileInputFormat
 
 import org.apache.spark.TaskContext
 import org.apache.spark.input.{PortableDataStream, StreamInputFormat}
-import org.apache.spark.internal.Logging
+import org.apache.spark.internal.{Logging, MDC}
+import org.apache.spark.internal.LogKey.PATH
 import org.apache.spark.rdd.{BinaryFileRDD, RDD}
 import org.apache.spark.sql.{Dataset, Encoders, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
@@ -168,7 +170,7 @@ object TextInputCSVDataSource extends CSVDataSource {
   }
 }
 
-object MultiLineCSVDataSource extends CSVDataSource {
+object MultiLineCSVDataSource extends CSVDataSource with Logging {
   override val isSplitable: Boolean = false
 
   override def readFile(
@@ -189,13 +191,26 @@ object MultiLineCSVDataSource extends CSVDataSource {
       inputPaths: Seq[FileStatus],
       parsedOptions: CSVOptions): StructType = {
     val csv = createBaseRdd(sparkSession, inputPaths, parsedOptions)
+    val ignoreCorruptFiles = parsedOptions.ignoreCorruptFiles
+    val ignoreMissingFiles = parsedOptions.ignoreMissingFiles
     csv.flatMap { lines =>
-      val path = new Path(lines.getPath())
-      UnivocityParser.tokenizeStream(
-        CodecStreams.createInputStreamWithCloseResource(lines.getConfiguration, path),
-        shouldDropHeader = false,
-        new CsvParser(parsedOptions.asParserSettings),
-        encoding = parsedOptions.charset)
+      try {
+        val path = new Path(lines.getPath())
+        UnivocityParser.tokenizeStream(
+          CodecStreams.createInputStreamWithCloseResource(lines.getConfiguration, path),
+          shouldDropHeader = false,
+          new CsvParser(parsedOptions.asParserSettings),
+          encoding = parsedOptions.charset)
+      } catch {
+        case e: FileNotFoundException if ignoreMissingFiles =>
+          logWarning(log"Skipped missing file: ${MDC(PATH, lines.getPath())}", e)
+          Array.empty[Array[String]]
+        case e: FileNotFoundException if !ignoreMissingFiles => throw e
+        case e @ (_: RuntimeException | _: IOException) if ignoreCorruptFiles =>
+          logWarning(log"Skipped the rest of the content in the corrupted file: " +
+            log"${MDC(PATH, lines.getPath())}", e)
+          Array.empty[Array[String]]
+      }
     }.take(1).headOption match {
       case Some(firstRow) =>
         val caseSensitive = sparkSession.sessionState.conf.caseSensitiveAnalysis

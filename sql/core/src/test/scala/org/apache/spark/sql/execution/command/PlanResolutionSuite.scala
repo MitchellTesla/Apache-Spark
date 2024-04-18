@@ -36,9 +36,10 @@ import org.apache.spark.sql.catalyst.plans.logical.{AlterColumn, AnalysisOnlyCom
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.TypeUtils.toSQLId
 import org.apache.spark.sql.connector.FakeV2Provider
-import org.apache.spark.sql.connector.catalog.{CatalogManager, CatalogNotFoundException, Column, ColumnDefaultValue, Identifier, SupportsDelete, Table, TableCapability, TableCatalog, V1Table}
+import org.apache.spark.sql.connector.catalog.{CatalogManager, Column, ColumnDefaultValue, Identifier, SupportsDelete, Table, TableCapability, TableCatalog, V1Table}
 import org.apache.spark.sql.connector.catalog.CatalogManager.SESSION_CATALOG_NAME
 import org.apache.spark.sql.connector.expressions.{LiteralValue, Transform}
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.datasources.{CreateTable => CreateTableV1}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.internal.{HiveSerDe, SQLConf}
@@ -194,8 +195,7 @@ class PlanResolutionSuite extends AnalysisTest {
           testCat
         case CatalogManager.SESSION_CATALOG_NAME =>
           v2SessionCatalog
-        case name =>
-          throw new CatalogNotFoundException(s"No such catalog: $name")
+        case name => throw QueryExecutionErrors.catalogNotFoundError(name)
       }
     })
     when(manager.currentCatalog).thenReturn(testCat)
@@ -211,8 +211,7 @@ class PlanResolutionSuite extends AnalysisTest {
       invocation.getArguments()(0).asInstanceOf[String] match {
         case "testcat" =>
           testCat
-        case name =>
-          throw new CatalogNotFoundException(s"No such catalog: $name")
+        case name => throw QueryExecutionErrors.catalogNotFoundError(name)
       }
     })
     when(manager.currentCatalog).thenReturn(v2SessionCatalog)
@@ -233,7 +232,7 @@ class PlanResolutionSuite extends AnalysisTest {
     }
     val analyzer = new Analyzer(catalogManager) {
       override val extendedResolutionRules: Seq[Rule[LogicalPlan]] = Seq(
-        new ResolveSessionCatalog(catalogManager))
+        new ResolveSessionCatalog(this.catalogManager))
     }
     // We don't check analysis here by default, as we expect the plan to be unresolved
     // such as `CreateTable`.
@@ -1275,7 +1274,7 @@ class PlanResolutionSuite extends AnalysisTest {
       },
       errorClass = "INSERT_COLUMN_ARITY_MISMATCH.NOT_ENOUGH_DATA_COLUMNS",
       parameters = Map(
-        "tableName" -> "`tab2`",
+        "tableName" -> "`testcat`.`tab2`",
         "tableColumns" -> "`i`, `x`",
         "dataColumns" -> "`col1`")
     )
@@ -1587,7 +1586,7 @@ class PlanResolutionSuite extends AnalysisTest {
         // basic
         val sql1 =
           s"""
-             |MERGE INTO $target AS target
+             |MERGE WITH SCHEMA EVOLUTION INTO $target AS target
              |USING $source AS source
              |ON target.i = source.i
              |WHEN MATCHED AND (target.s='delete') THEN DELETE
@@ -1609,12 +1608,14 @@ class PlanResolutionSuite extends AnalysisTest {
                   insertAssigns)),
               Seq(DeleteAction(Some(EqualTo(ndl: AttributeReference, StringLiteral("delete")))),
                 UpdateAction(Some(EqualTo(nul: AttributeReference, StringLiteral("update"))),
-                  notMatchedBySourceUpdateAssigns))) =>
+                  notMatchedBySourceUpdateAssigns)),
+              withSchemaEvolution) =>
             checkMergeConditionResolution(target, source, mergeCondition)
             checkMatchedClausesResolution(target, source, Some(dl), Some(ul), updateAssigns)
             checkNotMatchedClausesResolution(target, source, Some(il), insertAssigns)
             checkNotMatchedBySourceClausesResolution(target, Some(ndl), Some(nul),
               notMatchedBySourceUpdateAssigns)
+            assert(withSchemaEvolution === true)
 
           case other => fail("Expect MergeIntoTable, but got:\n" + other.treeString)
         }
@@ -1639,11 +1640,13 @@ class PlanResolutionSuite extends AnalysisTest {
                   StringLiteral("update"))), updateAssigns)),
               Seq(InsertAction(Some(EqualTo(il: AttributeReference, StringLiteral("insert"))),
                   insertAssigns)),
-              Seq()) =>
+              Seq(),
+              withSchemaEvolution) =>
             checkMergeConditionResolution(target, source, mergeCondition)
             checkMatchedClausesResolution(target, source, Some(dl), Some(ul), updateAssigns,
               starInUpdate = true)
             checkNotMatchedClausesResolution(target, source, Some(il), insertAssigns)
+            assert(withSchemaEvolution === false)
 
           case other => fail("Expect MergeIntoTable, but got:\n" + other.treeString)
         }
@@ -1664,11 +1667,13 @@ class PlanResolutionSuite extends AnalysisTest {
               mergeCondition,
               Seq(UpdateAction(None, updateAssigns)),
               Seq(InsertAction(None, insertAssigns)),
-              Seq()) =>
+              Seq(),
+              withSchemaEvolution) =>
             checkMergeConditionResolution(target, source, mergeCondition)
             checkMatchedClausesResolution(target, source, None, None, updateAssigns,
               starInUpdate = true)
             checkNotMatchedClausesResolution(target, source, None, insertAssigns)
+            assert(withSchemaEvolution === false)
 
           case other => fail("Expect MergeIntoTable, but got:\n" + other.treeString)
         }
@@ -1693,12 +1698,14 @@ class PlanResolutionSuite extends AnalysisTest {
               Seq(DeleteAction(Some(_)), UpdateAction(None, updateAssigns)),
               Seq(InsertAction(None, insertAssigns)),
               Seq(DeleteAction(Some(EqualTo(_: AttributeReference, StringLiteral("delete")))),
-                UpdateAction(None, notMatchedBySourceUpdateAssigns))) =>
+                UpdateAction(None, notMatchedBySourceUpdateAssigns)),
+              withSchemaEvolution) =>
             checkMergeConditionResolution(target, source, mergeCondition)
             checkMatchedClausesResolution(target, source, None, None, updateAssigns)
             checkNotMatchedClausesResolution(target, source, None, insertAssigns)
             checkNotMatchedBySourceClausesResolution(target, None, None,
               notMatchedBySourceUpdateAssigns)
+            assert(withSchemaEvolution === false)
 
           case other => fail("Expect MergeIntoTable, but got:\n" + other.treeString)
         }
@@ -1728,12 +1735,14 @@ class PlanResolutionSuite extends AnalysisTest {
                   insertAssigns)),
               Seq(DeleteAction(Some(EqualTo(ndl: AttributeReference, StringLiteral("delete")))),
                 UpdateAction(Some(EqualTo(nul: AttributeReference, StringLiteral("update"))),
-                  notMatchedBySourceUpdateAssigns))) =>
+                  notMatchedBySourceUpdateAssigns)),
+              withSchemaEvolution) =>
             checkMergeConditionResolution(target, source, mergeCondition)
             checkMatchedClausesResolution(target, source, Some(dl), Some(ul), updateAssigns)
             checkNotMatchedClausesResolution(target, source, Some(il), insertAssigns)
             checkNotMatchedBySourceClausesResolution(target, Some(ndl), Some(nul),
               notMatchedBySourceUpdateAssigns)
+            assert(withSchemaEvolution === false)
 
           case other => fail("Expect MergeIntoTable, but got:\n" + other.treeString)
         }
@@ -1765,12 +1774,14 @@ class PlanResolutionSuite extends AnalysisTest {
                   insertAssigns)),
               Seq(DeleteAction(Some(EqualTo(ndl: AttributeReference, StringLiteral("delete")))),
                 UpdateAction(Some(EqualTo(nul: AttributeReference, StringLiteral("update"))),
-                  notMatchedBySourceUpdateAssigns))) =>
+                  notMatchedBySourceUpdateAssigns)),
+              withSchemaEvolution) =>
             checkMergeConditionResolution(target, source, mergeCondition)
             checkMatchedClausesResolution(target, source, Some(dl), Some(ul), updateAssigns)
             checkNotMatchedClausesResolution(target, source, Some(il), insertAssigns)
             checkNotMatchedBySourceClausesResolution(target, Some(ndl), Some(nul),
               notMatchedBySourceUpdateAssigns)
+            assert(withSchemaEvolution === false)
           case other => fail("Expect MergeIntoTable, but got:\n" + other.treeString)
         }
 
@@ -1838,6 +1849,7 @@ class PlanResolutionSuite extends AnalysisTest {
               case other =>
                 fail("unexpected second not matched by source action " + other)
             }
+            assert(m.withSchemaEvolution === false)
 
           case other =>
             fail("Expect MergeIntoTable, but got:\n" + other.treeString)
@@ -1906,6 +1918,7 @@ class PlanResolutionSuite extends AnalysisTest {
           Seq(Assignment(_: AttributeReference, Literal(42, IntegerType)))) =>
           case other => fail("unexpected second not matched by source action " + other)
         }
+        assert(m.withSchemaEvolution === false)
 
       case other =>
         fail("Expect MergeIntoTable, but got:\n" + other.treeString)
@@ -2010,6 +2023,7 @@ class PlanResolutionSuite extends AnalysisTest {
         assert(m.matchedActions.length == 2)
         assert(m.notMatchedActions.length == 1)
         assert(m.notMatchedBySourceActions.length == 2)
+        assert(m.withSchemaEvolution === false)
 
       case other =>
         fail("Expect MergeIntoTable, but got:\n" + other.treeString)
@@ -2046,7 +2060,8 @@ class PlanResolutionSuite extends AnalysisTest {
             Seq(InsertAction(
               Some(EqualTo(il: AttributeReference, StringLiteral("a"))),
             insertAssigns)),
-            Seq(DeleteAction(Some(_)), UpdateAction(None, secondUpdateAssigns))) =>
+            Seq(DeleteAction(Some(_)), UpdateAction(None, secondUpdateAssigns)),
+            withSchemaEvolution) =>
           val ti = target.output.find(_.name == "i").get
           val ts = target.output.find(_.name == "s").get
           val si = source.output.find(_.name == "i").get
@@ -2065,6 +2080,7 @@ class PlanResolutionSuite extends AnalysisTest {
           assert(secondUpdateAssigns.size == 1)
           // UPDATE key is resolved with target table only, so column `s` is not ambiguous.
           assert(secondUpdateAssigns.head.key.asInstanceOf[AttributeReference].sameRef(ts))
+          assert(withSchemaEvolution === false)
 
         case p => fail("Expect MergeIntoTable, but got:\n" + p.treeString)
       }
@@ -2151,7 +2167,8 @@ class PlanResolutionSuite extends AnalysisTest {
             _,
             Seq(),
             Seq(),
-            notMatchedBySourceActions) =>
+            notMatchedBySourceActions,
+            withSchemaEvolution) =>
           assert(notMatchedBySourceActions.length == 2)
           notMatchedBySourceActions(0) match {
             case DeleteAction(Some(EqualTo(dl: AttributeReference, StringLiteral("b")))) =>
@@ -2172,6 +2189,7 @@ class PlanResolutionSuite extends AnalysisTest {
               assert(us.sameRef(ti))
             case other => fail("unexpected second not matched by source action " + other)
           }
+          assert(withSchemaEvolution === false)
       }
 
       val sql7 =
@@ -2206,6 +2224,7 @@ class PlanResolutionSuite extends AnalysisTest {
       case u: MergeIntoTable =>
         assert(u.targetTable.isInstanceOf[UnresolvedRelation])
         assert(u.sourceTable.isInstanceOf[UnresolvedRelation])
+        assert(u.withSchemaEvolution === false)
       case _ => fail("Expect MergeIntoTable, but got:\n" + parsed.treeString)
     }
 
@@ -2284,6 +2303,7 @@ class PlanResolutionSuite extends AnalysisTest {
             assert(s2.functionName == "varcharTypeWriteSideCheck")
           case other => fail("Expect UpdateAction, but got: " + other)
         }
+        assert(m.withSchemaEvolution === false)
       case other => fail("Expect MergeIntoTable, but got:\n" + other.treeString)
     }
   }
@@ -2305,12 +2325,14 @@ class PlanResolutionSuite extends AnalysisTest {
           _,
           Seq(DeleteAction(None)),
           Seq(InsertAction(None, insertAssigns)),
-          Nil) =>
+          Nil,
+          withSchemaEvolution) =>
         // There is only one assignment, the missing col is not filled with default value
         assert(insertAssigns.size == 1)
         // Special case: Spark does not resolve any columns in MERGE if table accepts any schema.
         assert(insertAssigns.head.key.asInstanceOf[UnresolvedAttribute].name == "target.i")
         assert(insertAssigns.head.value.asInstanceOf[UnresolvedAttribute].name == "DEFAULT")
+        assert(withSchemaEvolution === false)
 
       case l => fail("Expected unresolved MergeIntoTable, but got:\n" + l.treeString)
     }
@@ -2753,8 +2775,8 @@ class PlanResolutionSuite extends AnalysisTest {
       exception = intercept[ParseException] {
         extractTableDesc(s4)
       },
-      errorClass = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" -> "STORED BY"),
+      errorClass = "INVALID_STATEMENT_OR_CLAUSE",
+      parameters = Map("operation" -> "STORED BY"),
       context = ExpectedContext(
         fragment = "STORED BY 'storage.handler.class.name'",
         start = 23,
@@ -2920,8 +2942,8 @@ class PlanResolutionSuite extends AnalysisTest {
       exception = intercept[ParseException] {
         parsePlan(query1)
       },
-      errorClass = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" -> "CREATE TABLE ... SKEWED BY"),
+      errorClass = "INVALID_STATEMENT_OR_CLAUSE",
+      parameters = Map("operation" -> "CREATE TABLE ... SKEWED BY"),
       context = ExpectedContext(fragment = query1, start = 0, stop = 72))
 
     val query2 = s"$baseQuery(id, name) ON ((1, 'x'), (2, 'y'), (3, 'z'))"
@@ -2929,8 +2951,8 @@ class PlanResolutionSuite extends AnalysisTest {
       exception = intercept[ParseException] {
         parsePlan(query2)
       },
-      errorClass = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" -> "CREATE TABLE ... SKEWED BY"),
+      errorClass = "INVALID_STATEMENT_OR_CLAUSE",
+      parameters = Map("operation" -> "CREATE TABLE ... SKEWED BY"),
       context = ExpectedContext(fragment = query2, start = 0, stop = 96))
 
     val query3 = s"$baseQuery(id, name) ON ((1, 'x'), (2, 'y'), (3, 'z')) STORED AS DIRECTORIES"
@@ -2938,8 +2960,8 @@ class PlanResolutionSuite extends AnalysisTest {
       exception = intercept[ParseException] {
         parsePlan(query3)
       },
-      errorClass = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" -> "CREATE TABLE ... SKEWED BY"),
+      errorClass = "INVALID_STATEMENT_OR_CLAUSE",
+      parameters = Map("operation" -> "CREATE TABLE ... SKEWED BY"),
       context = ExpectedContext(fragment = query3, start = 0, stop = 118))
   }
 
@@ -2993,8 +3015,8 @@ class PlanResolutionSuite extends AnalysisTest {
       exception = intercept[ParseException] {
         parsePlan(query1)
       },
-      errorClass = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" -> "STORED BY"),
+      errorClass = "INVALID_STATEMENT_OR_CLAUSE",
+      parameters = Map("operation" -> "STORED BY"),
       context = ExpectedContext(
         fragment = "STORED BY 'org.papachi.StorageHandler'",
         start = 44,
@@ -3005,8 +3027,8 @@ class PlanResolutionSuite extends AnalysisTest {
       exception = intercept[ParseException] {
         parsePlan(query2)
       },
-      errorClass = "_LEGACY_ERROR_TEMP_0035",
-      parameters = Map("message" -> "STORED BY"),
+      errorClass = "INVALID_STATEMENT_OR_CLAUSE",
+      parameters = Map("operation" -> "STORED BY"),
       context = ExpectedContext(
         fragment = "STORED BY 'org.mamachi.StorageHandler' WITH SERDEPROPERTIES ('k1'='v1')",
         start = 44,

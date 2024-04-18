@@ -20,7 +20,7 @@ package org.apache.spark.sql.execution.datasources
 import java.util.{Date, UUID}
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileAlreadyExistsException, Path}
+import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce._
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
@@ -28,7 +28,6 @@ import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 import org.apache.spark._
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
-import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
@@ -37,11 +36,10 @@ import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, DateTimeUtils}
 import org.apache.spark.sql.connector.write.WriterCommitMessage
-import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.{ProjectExec, SortExec, SparkPlan, SQLExecution, UnsafeExternalRowSorter}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.util.{SerializableConfiguration, Utils}
+import org.apache.spark.util.ArrayImplicits._
 
 
 /** A helper object for writing FileFormat data out to a location. */
@@ -231,7 +229,7 @@ object FileFormatWriter extends Logging {
       // SPARK-23271 If we are attempting to write a zero partition rdd, create a dummy single
       // partition rdd to make sure we at least set up one write task to write the metadata.
       val rddWithNonEmptyPartitions = if (rdd.partitions.length == 0) {
-        sparkSession.sparkContext.parallelize(Array.empty[InternalRow], 1)
+        sparkSession.sparkContext.parallelize(Array.empty[InternalRow].toImmutableArraySeq, 1)
       } else {
         rdd
       }
@@ -272,10 +270,12 @@ object FileFormatWriter extends Logging {
       val commitMsgs = ret.map(_.commitMsg)
 
       logInfo(s"Start to commit write Job ${description.uuid}.")
-      val (_, duration) = Utils.timeTakenMs { committer.commitJob(job, commitMsgs) }
+      val (_, duration) = Utils
+        .timeTakenMs { committer.commitJob(job, commitMsgs.toImmutableArraySeq) }
       logInfo(s"Write Job ${description.uuid} committed. Elapsed time: $duration ms.")
 
-      processStats(description.statsTrackers, ret.map(_.summary.stats), duration)
+      processStats(
+        description.statsTrackers, ret.map(_.summary.stats).toImmutableArraySeq, duration)
       logInfo(s"Finished processing stats for write job ${description.uuid}.")
 
       // return a set of all the partition paths that were updated during this job
@@ -397,28 +397,17 @@ object FileFormatWriter extends Logging {
         }
       }
 
-    try {
-      Utils.tryWithSafeFinallyAndFailureCallbacks(block = {
-        // Execute the task to write rows out and commit the task.
-        dataWriter.writeWithIterator(iterator)
-        dataWriter.commit()
-      })(catchBlock = {
-        // If there is an error, abort the task
-        dataWriter.abort()
-        logError(s"Job $jobId aborted.")
-      }, finallyBlock = {
-        dataWriter.close()
-      })
-    } catch {
-      case e: FetchFailedException =>
-        throw e
-      case f: FileAlreadyExistsException if SQLConf.get.fastFailFileFormatOutput =>
-        // If any output file to write already exists, it does not make sense to re-run this task.
-        // We throw the exception and let Executor throw ExceptionFailure to abort the job.
-        throw new TaskOutputFileAlreadyExistException(f)
-      case t: Throwable =>
-        throw QueryExecutionErrors.taskFailedWhileWritingRowsError(description.path, t)
-    }
+    Utils.tryWithSafeFinallyAndFailureCallbacks(block = {
+      // Execute the task to write rows out and commit the task.
+      dataWriter.writeWithIterator(iterator)
+      dataWriter.commit()
+    })(catchBlock = {
+      // If there is an error, abort the task
+      dataWriter.abort()
+      logError(s"Job $jobId aborted.")
+    }, finallyBlock = {
+      dataWriter.close()
+    })
   }
 
   /**
